@@ -1,0 +1,8 @@
+{
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "encoding": "UTF-8",
+    "gitignore": true
+  }
+}
