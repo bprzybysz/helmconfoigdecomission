@@ -178,11 +178,14 @@ def test_process_files(mcp_server: FileSystemMCPServer, temp_dir: Path):
 def test_e2e_mcp_server_with_git(mcp_server: FileSystemMCPServer, git_repo: Path):
     """End-to-end test for file processing within a git branch."""
     client = TestClient(mcp_server)
-    """End-to-end test for file processing within a git branch."""
     branch_name = "test-mcp-e2e"
     commit_message = "feat: test file deletion"
-
-    with GitBranchContext(str(git_repo), branch_name, commit_message) as git_util:
+    
+    # Create a GitRepository instance
+    git_repo_obj = GitRepository(str(git_repo))
+    
+    # Pass the GitRepository instance instead of the path
+    with GitBranchContext(git_repo_obj, branch_name, True) as git_util:
         files_to_delete = [
             str(git_repo / "file1.txt"),
             str(git_repo / "file2.log")
@@ -199,6 +202,10 @@ def test_e2e_mcp_server_with_git(mcp_server: FileSystemMCPServer, git_repo: Path
         
         deleted_files = [f for f in all_files if f['deleted']]
         assert len(deleted_files) == 2
+        
+        # Stage and commit the changes
+        git_repo_obj._run_git_command(["add", "."])
+        git_repo_obj._run_git_command(["commit", "-m", commit_message])
 
     # After the context manager, we are on the original branch.
     # The test branch should exist with the commit.

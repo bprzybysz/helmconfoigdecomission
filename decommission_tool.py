@@ -25,6 +25,7 @@ class PostgreSQLDecommissionTool:
         self.constraints = {
             'yaml_extensions': ['.yaml', '.yml'],
             'source_extensions': ['.go', '.py', '.ts', '.js', '.java', '.rb', '.php'],
+            'documentation_extensions': ['.md'],
             'exclude_dirs': ['.git', 'node_modules', '__pycache__', '.pytest_cache', 'vendor', 'target', 'build', 'dist']
         }
 
@@ -55,8 +56,9 @@ class PostgreSQLDecommissionTool:
         logging.info(f"Scanning repository {self.repo_path} for references to '{self.db_name}'...")
         for file_path in self.repo_path.rglob('*'):
             if file_path.is_file() and not self._is_excluded(file_path):
-                if file_path.suffix in self.constraints['yaml_extensions'] or \
-                   file_path.suffix in self.constraints['source_extensions']:
+                if (file_path.suffix in self.constraints['yaml_extensions'] or 
+                    file_path.suffix in self.constraints['source_extensions'] or
+                    file_path.suffix in self.constraints['documentation_extensions']):
                     found_lines = self.scan_file(file_path)
                     if found_lines:
                         self.findings[str(file_path.relative_to(self.repo_path))] = found_lines
@@ -189,6 +191,15 @@ class HelmDecommissionTool(PostgreSQLDecommissionTool):
         return report
 
 def main():
+    # Configure logging to output to stdout
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
     parser = argparse.ArgumentParser(description="Decommission a PostgreSQL database from a repository.")
     parser.add_argument('repo_path', help="Path to the Git repository.")
     parser.add_argument('db_name', help="Name of the database to decommission.")
@@ -221,6 +232,10 @@ def main():
     logging.info(f"Repository Path: {report['repository_path']}")
     logging.info(f"Dry Run: {report['dry_run']}")
     logging.info(f"Remove Mode: {report['remove_mode']}")
+    
+    # Add message when no changes are made in non-remove mode
+    if not args.remove and not args.dry_run:
+        logging.info("\nNo changes were made to files. Use --remove to make changes.")
 
     if report['findings']:
         logging.info("\nFound references:")
