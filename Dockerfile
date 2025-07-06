@@ -10,8 +10,7 @@ WORKDIR /app
 # Copy the current directory contents into the container at /app
 COPY . /app
 
-# Make the test_persistence.sh script executable
-RUN chmod +x /app/test_persistence.sh
+
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

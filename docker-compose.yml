@@ -5,12 +5,4 @@ services:
     build: .
     ports:
       - "5001:5000"
-    volumes:
-      - .:/app
-      - mcp-data:/mnt/data
     # Command to run the MCP server
-    command: python mcp_server_main.py
-
-volumes:
-  mcp-data:
-    driver: local
