@@ -58,12 +58,17 @@ class FileSystemMCPServer:
             }
 
             if scan_and_delete:
-                try:
-                    os.remove(file_path)
-                    file_info['deleted'] = True
-                    logging.info(f"Deleted file: {file_path}")
-                except OSError as e:
-                    logging.error(f"Error deleting file {file_path}: {e}")
+                if not self.is_persistent_storage(str(file_path.parent)):
+                    try:
+                        os.remove(file_path)
+                        file_info['deleted'] = True
+                        logging.info(f"Deleted file: {file_path}")
+                    except OSError as e:
+                        file_info['error'] = str(e)
+                        logging.error(f"Error deleting file {file_path}: {e}")
+                else:
+                    file_info['error'] = 'Cannot delete from persistent storage without force_delete=True'
+                    logging.warning(f"Prevented deletion of file in persistent storage: {file_path}")
             
             batch.append(file_info)
             if len(batch) >= batch_size:
@@ -77,7 +82,8 @@ class FileSystemMCPServer:
         self,
         files: List[str],
         scan_and_delete: bool = False,
-        batch_size: int = 10
+        batch_size: int = 10,
+        force_delete: bool = False
     ) -> Iterator[List[Dict[str, Any]]]:
         """Processes a list of files, with options for deletion and batching."""
         logging.info(f"Starting processing of {len(files)} files.")
@@ -96,12 +102,17 @@ class FileSystemMCPServer:
             }
 
             if scan_and_delete:
-                try:
-                    os.remove(file_path)
-                    file_info['deleted'] = True
-                    logging.info(f"Deleted file: {file_path}")
-                except OSError as e:
-                    logging.error(f"Error deleting file {file_path}: {e}")
+                if force_delete or not self.is_persistent_storage(str(file_path.parent)):
+                    try:
+                        os.remove(file_path)
+                        file_info['deleted'] = True
+                        logging.info(f"Deleted file: {file_path}")
+                    except OSError as e:
+                        file_info['error'] = str(e)
+                        logging.error(f"Error deleting file {file_path}: {e}")
+                else:
+                    file_info['error'] = 'Cannot delete from persistent storage without force_delete=True'
+                    logging.warning(f"Prevented deletion of file in persistent storage: {file_path}")
             
             batch.append(file_info)
             if len(batch) >= batch_size:

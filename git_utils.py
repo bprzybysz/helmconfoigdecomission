@@ -90,6 +90,15 @@ class GitRepository:
             return '\n'.join(diff_lines[:max_lines]) + f"\n... (diff truncated to {max_lines} lines)"
         return '\n'.join(diff_lines)
 
+    def checkout_branch(self, branch_name: str) -> bool:
+        result = self._run_command(['git', 'checkout', branch_name])
+        if result.returncode == 0:
+            logging.info(f"Switched to branch: {branch_name}")
+            return True
+        else:
+            logging.error(f"Failed to checkout branch '{branch_name}': {result.stderr}")
+            return False
+
 class GitBranchContext:
     """Context manager for running code within a git branch."""
     def __init__(self, repo_path: str, branch_name: str, commit_message: str = "Test commit"):

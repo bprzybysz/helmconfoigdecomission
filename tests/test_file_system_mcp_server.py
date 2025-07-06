@@ -11,6 +11,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from file_system_mcp_server import FileSystemMCPServer
 from git_utils import GitRepository, GitBranchContext
 
+class TestClient:
+    """A test client to simulate the client pattern for the MCP server."""
+    __test__ = False
+    def __init__(self, server: FileSystemMCPServer):
+        self.server = server
+
+    def process_files(self, files: list[str], scan_and_delete: bool = False):
+        return self.server.process_files(files, scan_and_delete=scan_and_delete)
+
 @pytest.fixture
 def temp_dir(tmp_path: Path) -> Path:
     """Create a temporary directory with some files for testing."""
@@ -68,6 +77,66 @@ def test_scan_and_delete(mcp_server: FileSystemMCPServer, temp_dir: Path):
     deleted_files = [f for f in all_files if f['deleted']]
     assert len(deleted_files) == 3
 
+def test_persistent_storage_protection(mcp_server: FileSystemMCPServer, tmp_path: Path, monkeypatch):
+    """Test that files in persistent storage are protected from deletion."""
+    # Create a directory that will be treated as persistent storage
+    persistent_dir = tmp_path / "mnt" / "persistent"
+    persistent_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create a test file in the persistent storage
+    test_file = persistent_dir / "protected_file.txt"
+    test_file.write_text("This is a protected file")
+    
+    # Create a regular file for comparison
+    regular_file = tmp_path / "regular_file.txt"
+    regular_file.write_text("This is a regular file")
+    
+    # Monkeypatch the is_persistent_storage method to recognize our test directory
+    original_is_persistent = mcp_server.is_persistent_storage
+    
+    def mock_is_persistent_storage(path):
+        if str(path).startswith(str(persistent_dir)):
+            return True
+        return original_is_persistent(path)
+    
+    monkeypatch.setattr(mcp_server, 'is_persistent_storage', mock_is_persistent_storage)
+    
+    # Try to delete both files without force_delete
+    files_to_delete = [str(test_file), str(regular_file)]
+    results = list(mcp_server.process_files(files_to_delete, scan_and_delete=True))
+    all_files = [item for batch in results for item in batch]
+    
+    # Verify the persistent file was not deleted
+    assert test_file.exists(), "Persistent storage file was deleted without force_delete"
+    assert not regular_file.exists(), "Regular file was not deleted"
+    
+    # Check the results
+    protected_result = next(f for f in all_files if f['path'] == str(test_file))
+    assert not protected_result['deleted'], "Protected file was marked as deleted"
+    assert 'error' in protected_result, "No error message for protected file"
+    assert 'persistent storage' in protected_result['error'], "Incorrect error message"
+    
+    # Now try with force_delete=True
+    results = list(mcp_server.process_files([str(test_file)], scan_and_delete=True, force_delete=True))
+    all_files = [item for batch in results for item in batch]
+    
+    # Verify the persistent file was deleted with force_delete
+    assert not test_file.exists(), "Persistent storage file was not deleted with force_delete"
+    deleted_file = all_files[0]
+    assert deleted_file['deleted'], "File was not marked as deleted with force_delete"
+    assert 'error' not in deleted_file, "Error present when deletion should have succeeded"
+    
+    # Clean up
+    try:
+        if test_file.exists():
+            test_file.unlink()
+        if regular_file.exists():
+            regular_file.unlink()
+        if persistent_dir.exists():
+            persistent_dir.rmdir()
+    except Exception as e:
+        print(f"Cleanup warning: {e}")
+
 def test_is_persistent_storage(mcp_server: FileSystemMCPServer):
     """Test the path classification logic."""
     assert mcp_server.is_persistent_storage("/mnt/data/some/path")
@@ -108,6 +177,8 @@ def test_process_files(mcp_server: FileSystemMCPServer, temp_dir: Path):
 
 def test_e2e_mcp_server_with_git(mcp_server: FileSystemMCPServer, git_repo: Path):
     """End-to-end test for file processing within a git branch."""
+    client = TestClient(mcp_server)
+    """End-to-end test for file processing within a git branch."""
     branch_name = "test-mcp-e2e"
     commit_message = "feat: test file deletion"
 
@@ -119,7 +190,7 @@ def test_e2e_mcp_server_with_git(mcp_server: FileSystemMCPServer, git_repo: Path
         assert (git_repo / "file1.txt").exists()
         assert (git_repo / "file2.log").exists()
 
-        results = list(mcp_server.process_files(files_to_delete, scan_and_delete=True))
+        results = list(client.process_files(files_to_delete, scan_and_delete=True))
         all_files = [item for batch in results for item in batch]
         
         assert len(all_files) == 2
@@ -132,7 +203,7 @@ def test_e2e_mcp_server_with_git(mcp_server: FileSystemMCPServer, git_repo: Path
     # After the context manager, we are on the original branch.
     # The test branch should exist with the commit.
     git_util = GitRepository(str(git_repo))
-    assert git_util.create_test_branch(branch_name)  # Checks out the branch
+    assert git_util.checkout_branch(branch_name)  # Checks out the branch
 
     log_result = subprocess.run(["git", "log", "-1", "--pretty=%B"], cwd=git_repo, check=True, capture_output=True, text=True)
     assert commit_message in log_result.stdout
