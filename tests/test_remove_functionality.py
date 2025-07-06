@@ -85,11 +85,14 @@ spec:
 def test_remove_postgres_references(temp_repo_with_postgres):
     """Test that PostgreSQL references are correctly removed from all files."""
     # First, generate a summary and plan
-    result = generate_summary_and_plan(str(temp_repo_with_postgres), "my_test_db")
+    tool_instance = PostgreSQLDecommissionTool(str(temp_repo_with_postgres), "my_test_db")
+    tool_instance.scan_repository()
+    report = tool_instance.generate_report()
+    result = generate_summary_and_plan(tool_instance, report)
     
     # Verify the summary contains the expected information
-    assert result['summary']['database_name'] == 'my_test_db'
-    assert result['summary']['repository_path'] == str(temp_repo_with_postgres)
+    assert tool_instance.db_name == 'my_test_db'
+    assert tool_instance.repo_path == temp_repo_with_postgres
     assert result['summary']['files_affected'] > 0
     
     # Now run the actual removal
@@ -129,7 +132,10 @@ def test_remove_postgres_references(temp_repo_with_postgres):
 def test_generate_summary_and_plan(temp_repo_with_postgres):
     """Test the generate_summary_and_plan function."""
     # Generate the summary and plan
-    result = generate_summary_and_plan(str(temp_repo_with_postgres), "my_test_db")
+    tool_instance = PostgreSQLDecommissionTool(str(temp_repo_with_postgres), "my_test_db")
+    tool_instance.scan_repository()
+    report = tool_instance.generate_report()
+    result = generate_summary_and_plan(tool_instance, report)
     
     # Verify the structure of the result
     assert 'summary' in result
