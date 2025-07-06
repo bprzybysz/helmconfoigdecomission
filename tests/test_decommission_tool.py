@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, mock_open
-from decommission_tool import PostgreSQLDecommissionTool, generate_summary_and_plan
+from decommission_tool import PostgreSQLDecommissionTool, generate_summary_and_plan, main
 
 @pytest.fixture
 def git_repo(temp_repo: Path, request) -> Path:
@@ -270,3 +270,58 @@ def test_integration_with_real_helm_chart(temp_repo: Path):
         assert any('pvc.yaml' in f['file'] for f in findings['pvc_references'])
         assert any('.go' in f['file'] for f in findings['source_code_references'])
         assert any('.py' in f['file'] for f in findings['source_code_references'])
+
+def test_commit_changes_logic(git_repo: Path):
+    """Test the commit_changes method's specific logic for various scenarios."""
+    db_name = "commit_test_db"
+    tool = PostgreSQLDecommissionTool(str(git_repo), db_name, remove=True)
+
+    # Must be on a test branch to commit
+    assert tool.create_test_branch("commit-logic-test")
+
+    # 1. Test committing when there are no changes
+    assert tool.commit_changes() is True, "Should return True even with no changes"
+    
+    # Verify no new commit was made
+    log_result_before = subprocess.run(
+        ["git", "log", "--oneline"], 
+        cwd=git_repo, check=True, capture_output=True, text=True
+    )
+    
+    # 2. Test committing with actual changes and custom message
+    (git_repo / "new_file.txt").write_text("some changes")
+    
+    assert tool.commit_changes("feat: add new file") is True, "Should commit successfully"
+    
+    log_result_after = subprocess.run(
+        ["git", "log", "--oneline"], 
+        cwd=git_repo, check=True, capture_output=True, text=True
+    )
+    
+    assert len(log_result_after.stdout.splitlines()) > len(log_result_before.stdout.splitlines()), "A new commit should have been created"
+    assert "feat: add new file" in log_result_after.stdout
+
+    # 3. Test default commit message
+    (git_repo / "another_file.txt").write_text("more changes")
+    assert tool.commit_changes() is True, "Should commit with default message"
+
+    log_result_final = subprocess.run(
+        ["git", "log", "--oneline"],
+        cwd=git_repo, check=True, capture_output=True, text=True
+    )
+    assert f"feat: Decommission PostgreSQL DB '{db_name}'" in log_result_final.stdout, "Default commit message was not used"
+
+
+def test_main_invalid_repo_path(capsys):
+    """Test that the main function exits cleanly with an invalid repo path."""
+    invalid_path = "/path/to/nonexistent/repo"
+    with patch('sys.argv', ['decommission_tool.py', invalid_path, 'test_db']), \
+         pytest.raises(SystemExit) as e:
+        main()
+    
+    assert e.type == SystemExit
+    assert e.value.code == 1
+    
+    captured = capsys.readouterr()
+    assert f"Error: The provided repository path '{invalid_path}' does not exist or is not a directory." in captured.err
+

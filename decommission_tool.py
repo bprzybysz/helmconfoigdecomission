@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import argparse
 import yaml
 import subprocess
 from pathlib import Path
@@ -65,33 +66,49 @@ class PostgreSQLDecommissionTool:
             return False
 
     def commit_changes(self, message: Optional[str] = None) -> bool:
-        """Commit changes to the test branch."""
+        """Check git status, stage all changes, and commit them to the test branch."""
         if not self.test_branch:
             print("Not on a test branch. Cannot commit.", file=sys.stderr)
             return False
-        
+
+        status = self.get_git_status()
+        if not status.get('modified') and not status.get('deleted') and not status.get('untracked'):
+            print("No changes to commit.")
+            return True
+
         if not message:
-            message = f"chore: remove PostgreSQL database '{self.db_name}' references"
-        
+            message = f"feat: Decommission PostgreSQL DB '{self.db_name}'"
+
         add_result = self._run_git_command(['git', 'add', '.'])
         if add_result.returncode != 0:
             print(f"Failed to stage changes: {add_result.stderr}", file=sys.stderr)
             return False
-        
+
         commit_result = self._run_git_command(['git', 'commit', '-m', message])
         if commit_result.returncode != 0:
+            # This check is slightly redundant now, but provides good defense in depth
             if "nothing to commit" in commit_result.stdout or "nothing to commit" in commit_result.stderr:
                 print("No changes to commit.")
                 return True
             print(f"Failed to commit changes: {commit_result.stderr}", file=sys.stderr)
             return False
-        
+
         print(f"Committed changes with message: '{message}'")
         return True
 
     def switch_back_to_original(self) -> bool:
-        """Switch back to original branch"""
-        return self.revert_changes()
+        """Switch back to the original branch without deleting the test branch."""
+        if not self.original_branch:
+            print("Original branch not set. Cannot switch back.", file=sys.stderr)
+            return False
+
+        result = self._run_git_command(['git', 'checkout', self.original_branch])
+        if result.returncode != 0:
+            print(f"Failed to switch back to original branch: {result.stderr}", file=sys.stderr)
+            return False
+        
+        print(f"Switched back to {self.original_branch}")
+        return True
 
     def delete_test_branch(self) -> bool:
         """Delete the test branch"""
@@ -129,22 +146,26 @@ class PostgreSQLDecommissionTool:
         return True
 
     def get_git_status(self) -> Dict[str, List[str]]:
-        """Get git status."""
+        """Get git status and categorize changes from 'git status --porcelain'."""
         status_result = self._run_git_command(['git', 'status', '--porcelain'])
         if status_result.returncode != 0:
             return {'error': ['Could not get git status.']}
-        
-        status = {'modified': [], 'deleted': [], 'added': [], 'untracked': []}
+
+        changes: Dict[str, List[str]] = {'modified': [], 'deleted': [], 'untracked': []}
         for line in status_result.stdout.strip().splitlines():
-            if line.startswith(' M '):
-                status['modified'].append(line[3:])
-            elif line.startswith(' D '):
-                status['deleted'].append(line[3:])
-            elif line.startswith('A  '):
-                status['added'].append(line[3:])
-            elif line.startswith('?? '):
-                status['untracked'].append(line[3:])
-        return status
+            if not line:
+                continue
+
+            code = line[:2]
+            path = line[3:]
+
+            if 'M' in code:
+                changes['modified'].append(path)
+            elif 'D' in code:
+                changes['deleted'].append(path)
+            elif code == '??':
+                changes['untracked'].append(path)
+        return changes
 
     def _is_excluded(self, path: Path) -> bool:
         """Check if a file or directory should be excluded from scan."""
@@ -290,17 +311,7 @@ class PostgreSQLDecommissionTool:
             return '\n'.join(diff_lines[:max_lines]) + f"\n... (diff truncated to {max_lines} lines)"
         return '\n'.join(diff_lines)
 
-    def commit_changes(self, message: Optional[str] = None) -> bool:
-        """Commit changes."""
-        if not message:
-            message = f"feat: Decommission {self.db_name}"
-        
-        commit_result = self._run_git_command(['git', 'commit', '-m', message])
-        if commit_result.returncode != 0:
-            print(f"Failed to commit changes: {commit_result.stderr}", file=sys.stderr)
-            return False
-        
-        return True
+
 
     def run(self):
         """Run the decommissioning tool."""
@@ -356,58 +367,73 @@ def generate_summary_and_plan(findings: Dict, db_name: str, remove: bool) -> Tup
 
     return "\n".join(summary_lines), "\n".join(plan_lines)
 
-if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python decommission_tool.py <repo_path> <db_name> [--remove]", file=sys.stderr)
-        sys.exit(1)
-    
-    repo_path = sys.argv[1]
-    db_name = sys.argv[2]
-    remove = "--remove" in sys.argv
+def main():
+    """Main function to parse arguments and run the tool."""
+    parser = argparse.ArgumentParser(
+        description="A tool to scan a repository for PostgreSQL database references and optionally remove them.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument("repo_path", help="The absolute path to the repository to scan.")
+    parser.add_argument("db_name", help="The name of the PostgreSQL database to search for.")
+    parser.add_argument(
+        "--remove",
+        action="store_true",
+        help="If set, creates a new git branch and removes all found references."
+    )
+    parser.add_argument(
+        "--branch-name",
+        help="Specify a custom name for the new branch created with --remove."
+    )
 
-    tool = PostgreSQLDecommissionTool(repo_path, db_name, remove)
+    args = parser.parse_args()
+
+    repo_path = Path(args.repo_path)
+    if not repo_path.is_dir():
+        print(f"Error: The provided repository path '{args.repo_path}' does not exist or is not a directory.", file=sys.stderr)
+        sys.exit(1)
+
+    tool = PostgreSQLDecommissionTool(str(repo_path), args.db_name, args.remove)
     
     try:
-        if remove:
-            if not tool.create_test_branch():
+        if args.remove:
+            if not tool.create_test_branch(args.branch_name):
                 print("Failed to create test branch. Aborting.", file=sys.stderr)
                 sys.exit(1)
             print(f"🌿 Switched to new branch: {tool.test_branch}")
 
         tool.run()
 
-        if not remove:
+        if not args.remove:
             summary, plan = generate_summary_and_plan(tool.findings, tool.db_name, tool.remove)
             print("\n📝 Summary of Findings:")
             print(summary)
             print("\n📝 Decommissioning Plan:")
             print(plan)
         else:
-            # Show git status after changes
             status_after = tool.get_git_status()
             print("\n📋 Files after modification:")
             for status_type, files in status_after.items():
                 if files and status_type != 'error':
                     print(f"  {status_type}: {files}")
             
-            # Show diff
-            if status_after.get('modified') or status_after.get('deleted'):
+            if status_after.get('modified') or status_after.get('deleted') or status_after.get('untracked'):
                 print("\n📝 Changes made:")
                 print(tool.show_diff(max_lines=30))
             
-            # Commit changes
             print("\n💾 Committing changes...")
-            commit_message = f"feat: Decommission {db_name}"
-            if tool.commit_changes(commit_message):
+            if tool.commit_changes():
                 print("✅ Changes committed successfully")
             else:
                 print("❌ Failed to commit changes")
             
             print("\n✅ Database references removal process finished!")
             print(f"🌿 Changes are in branch: {tool.test_branch}")
-            print("💡 Use 'git checkout <original-branch>' to return to original state")
-            print("💡 Or run with revert flag to automatically clean up")
+            print(f"💡 To revert, run: git checkout {tool.original_branch} && git branch -D {tool.test_branch}")
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}", file=sys.stderr)
         sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
