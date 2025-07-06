@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  mcp-server:
+    build:
+      context: ../.
+      dockerfile: Dockerfile
+    image: decommission-tool:latest
+    container_name: mcp-server
+    healthcheck:
+      test: ["CMD", "python", "-m", "decommission_tool", "--help"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ../:/app

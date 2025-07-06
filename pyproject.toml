@@ -27,6 +27,8 @@ dev = [
     "mypy>=1.5.0",
     "black>=23.7.0",
     "ruff>=0.0.284",
+    "pip-tools>=7.0.0",
+
 ]
 
 [project.scripts]

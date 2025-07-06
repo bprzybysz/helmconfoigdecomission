@@ -1,7 +1,6 @@
 # Makefile for PostgreSQL Decommission Tool
-# UV-managed Python environment
 
-.PHONY: help install test test-unit test-integration test-e2e clean lint format typecheck check dev-setup ci clean-venv
+.PHONY: help install test test-unit test-integration test-e2e clean lint format typecheck check dev-setup ci clean-venv container-build container-shell container-clean container-debug-persistence generate-requirements
 
 # Variables
 PYTHON_VERSION := 3.11
@@ -12,11 +11,14 @@ PYTEST := $(VENV_DIR)/bin/pytest
 MYPY := $(VENV_DIR)/bin/mypy
 BLACK := $(VENV_DIR)/bin/black
 RUFF := $(VENV_DIR)/bin/ruff
+PIP_COMPILE := $(VENV_DIR)/bin/pip-compile
 
 # Container settings
 IMAGE_NAME ?= decommission-tool
 IMAGE_TAG ?= latest
-CONTAINER_RUNTIME := $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
+CONTAINER_RUNTIME := $(shell command -v podman 2>/dev/null || command -v docker 2>/dev_null)
+COMPOSE_FILE := tests/docker-compose.yml
+COMPOSE_CMD := $(CONTAINER_RUNTIME)-compose -f $(COMPOSE_FILE)
 
 # Help target
 help:
@@ -27,7 +29,7 @@ help:
 	@echo "  test          - Run all tests (unit, integration, e2e)"
 	@echo "  test-unit     - Run unit tests"
 	@echo "  test-integration - Run integration tests"
-	@echo "  test-e2e      - Run end-to-end tests"
+	@echo "  test-e2e      - Run end-to-end tests using docker-compose"
 	@echo "  lint          - Run code linter (ruff)"
 	@echo "  format        - Format code (black)"
 	@echo "  typecheck     - Run type checking (mypy)"
@@ -35,15 +37,43 @@ help:
 	@echo "  ci            - Run CI checks (lint, typecheck, test, build)"
 	@echo "  clean         - Clean up generated files and cache"
 	@echo "  clean-venv    - Remove virtual environment"
+	@echo "  container-build - Build the Docker container image"
+	@echo "  container-shell - Open a shell inside the running container"
+	@echo "  container-clean - Clean up Docker containers and volumes"
+	@echo "  container-debug-persistence - Inspect the persistence volume in the container"
+	@echo "  generate-requirements - Generate requirements.txt and requirements-dev.txt"
+
+# Virtual environment setup
+$(VENV_DIR)/bin/activate: pyproject.toml
+	@echo "Setting up virtual environment..."
+	@python$(PYTHON_VERSION) -m venv $(VENV_DIR)
+	@$(PIP) install --upgrade pip setuptools wheel pip-tools
+	@echo "Virtual environment ready."
 
 # Install dependencies
 install: $(VENV_DIR)/bin/activate
 	@echo "📦 Installing dependencies..."
-	@$(PIP) install -e '.[dev]'
+	@if [ -f requirements.txt ]; then \
+		$(PIP) install -r requirements.txt; \
+	else \
+		$(PIP) install .; \
+	fi
+	@if [ -f requirements-dev.txt ]; then \
+		$(PIP) install -r requirements-dev.txt; \
+	else \
+		$(PIP) install -e '.[dev]'; \
+	fi
 	@echo "✅ Dependencies installed"
 
+# Generate requirements files
+generate-requirements: $(VENV_DIR)/bin/activate
+	@echo "Generating requirements.txt and requirements-dev.txt..."
+	@$(PIP_COMPILE) --output-file requirements.txt pyproject.toml
+	@$(PIP_COMPILE) --extra dev --output-file requirements-dev.txt pyproject.toml
+	@echo "✅ Requirements files generated."
+
 # Set up development environment
-dev-setup: clean-venv install pre-commit
+dev-setup: clean-venv install
 	@echo "✨ Development environment ready"
 
 # Run all tests
@@ -59,144 +89,47 @@ test-integration: $(VENV_DIR)/bin/activate
 	@echo "🔍 Running integration tests..."
 	@$(PYTEST) tests/integration -v
 
-# Run end-to-end tests
-test-e2e: $(VENV_DIR)/bin/activate
-	@echo "🏁 Running end-to-end tests..."
-	@$(PYTEST) tests/e2e -v
+# Run end-to-end tests using docker-compose
+test-e2e: container-build
+	@echo "🧪 Running end-to-end tests..."
+	@$(PYTHON) tests/e2e_test.py
 
-# Run linter
+# Lint code
 lint: $(VENV_DIR)/bin/activate
-	@echo "🔍 Running linter..."
+	@echo "🔍 Running linter (ruff)..."
 	@$(RUFF) check .
-	@echo "✅ Linting passed"
 
 # Format code
 format: $(VENV_DIR)/bin/activate
 	@echo "🎨 Formatting code..."
 	@$(BLACK) .
-	@echo "✅ Formatting complete"
+	@$(RUFF) format .
 
-# Run type checking
+# Type check code
 typecheck: $(VENV_DIR)/bin/activate
-	@echo "🔍 Running type checking..."
-	@$(MYPY) decommission_tool tests
-	@echo "✅ Type checking passed"
+	@echo "🔍 Running type checker (mypy)..."
+	@$(MYPY) . --ignore-missing-imports
 
 # Run all checks
 check: lint typecheck test
 
-# Run CI checks
-ci: clean install lint typecheck test
-
-# Clean up generated files and cache
-clean:
-	@echo "🧹 Cleaning up..."
-	@rm -rf `find . -name __pycache__`
-	@rm -f `find . -type f -name '*.py[co]'`
-	@rm -f `find . -type f -name '*~'`
-	@rm -f `find . -type f -name '.*~'`
-	@rm -rf .cache
-	@rm -rf .pytest_cache
-	@rm -rf htmlcov
-	@rm -f .coverage
-	@rm -f .coverage.*
-	@echo "✅ Clean complete"
-
-# Remove virtual environment
-clean-venv:
-	@echo "🧹 Removing virtual environment..."
-	@rm -rf $(VENV_DIR)
-
-# Create virtual environment
-$(VENV_DIR)/bin/activate:
-	@echo "🐍 Creating Python $(PYTHON_VERSION) virtual environment..."
-	@python$(PYTHON_VERSION) -m venv $(VENV_DIR)
-	@$(PIP) install --upgrade pip setuptools wheel
-
-# Install pre-commit hooks
-pre-commit: $(VENV_DIR)/bin/activate
-	@echo "🔧 Installing pre-commit hooks..."
-	@$(PIP) install pre-commit
-	@$(VENV_DIR)/bin/pre-commit install
-
-# Build container image
-container-build:
-	@echo "🐳 Building container image..."
-	@$(CONTAINER_RUNTIME) build -t $(IMAGE_NAME):$(IMAGE_TAG) .
-
-# Run container with shell
-container-shell: container-build
-	@echo "🚀 Starting container with shell..."
-	@$(CONTAINER_RUNTIME) run -it --rm \
-		-v $(PWD):/app \
-		-w /app \
-		$(IMAGE_NAME):$(IMAGE_TAG) \
-		/bin/bash
-
-# Clean container images
-container-clean:
-	@echo "🧹 Cleaning container images..."
-	-@$(CONTAINER_RUNTIME) rmi $(IMAGE_NAME):$(IMAGE_TAG) 2>/dev/null || true
-
-# Run in development mode
-dev: install
-	@echo "🚀 Starting in development mode..."
-	@$(PYTHON) -m decommission_tool --help
-
-# Show help by default
-.DEFAULT_GOAL := help
-
-# Set up the full development environment
-dev-setup: install
-	@echo "✅ Development setup complete."
-
-# Run all tests
-test:
-	@echo "🧪 Running unit and integration tests..."
-	@uv run pytest tests/
-
-# Scan target repo
-scan-db:
-	@echo "🔎 Scanning $(TARGET_REPO_DIR) for database: $(DB_NAME) with args: $(ARGS)"
-	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME) $(ARGS)
-
-# Lint and type check code
-lint:
-	@echo "🔍 Running linter (ruff)..."
-	@uv run ruff check .
-	@echo "🔍 Running type checker (mypy)..."
-	@uv run mypy . --ignore-missing-imports
-
-# Format code
-format:
-	@echo "🎨 Formatting code..."
-	@$(VENV_DIR)/bin/uv run black .
-	@$(VENV_DIR)/bin/uv run ruff format .
-
-# Clean up generated files
-clean: container-clean
-	@echo "🧹 Cleaning up..."
-	@rm -rf .pytest_cache .mypy_cache
-	@find . -type d -name "__pycache__" -exec rm -r {} + > /dev/null 2>&1 || true
-	@rm -f decommission_findings.json
-	@rm -rf $(TARGET_REPO_DIR)
-
-# Primary E2E test target
-test-container-e2e:
-	@echo "🧪 Running containerized E2E tests..."
-	@$(PYTHON) -m pytest tests/test_container_e2e.py -v -s
-
-# CI/CD pipeline simulation[5]
+# CI/CD pipeline simulation
 ci:
 	@set -e; \
 	echo "🎯 Starting CI pipeline..."; \
 	make install; \
 	make lint; \
 	make test; \
-	make test-container-e2e; \
 	echo "✅ CI pipeline completed successfully"
 
-# Clean up generated files and artifacts[4]
+# Clean up generated files
+clean: container-clean
+	@echo "🧹 Cleaning up..."
+	@rm -rf .pytest_cache .mypy_cache
+	@find . -type d -name "__pycache__" -exec rm -r {} + > /dev/null 2>&1 || true
+	@rm -f decommission_findings.json requirements.txt requirements-dev.txt
+
+# Clean virtual environment
 clean-venv:
 	@echo "🧹 Cleaning virtual environment..."
 	@rm -rf $(VENV_DIR)

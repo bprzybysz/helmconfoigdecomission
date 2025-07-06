@@ -1,11 +1,13 @@
-import re
-import sys
-import argparse
 import logging
+import sys
+import re
 from pathlib import Path
-from typing import List, Dict, Tuple, Any
+import argparse
+import subprocess
+from typing import List, Tuple, Dict, Any
 import yaml
-from git_utils import GitRepository
+
+from git_utils import GitRepository, GitBranchContext
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
@@ -41,9 +43,27 @@ class PostgreSQLDecommissionTool:
         found_lines = []
         try:
             content = file_path.read_text(encoding='utf-8')
+
+            if file_path.name == "Chart.yaml":
+                try:
+                    chart_data = yaml.safe_load(content)
+                    if 'dependencies' in chart_data:
+                        for dep in chart_data['dependencies']:
+                            if dep.get('name') == 'postgresql':
+                                found_lines.append((0, "Helm PostgreSQL dependency")) # Dummy line number, actual removal is YAML-aware
+                                break
+                except yaml.YAMLError:
+                    logging.warning(f"Could not parse Chart.yaml: {file_path}")
+            elif file_path.name == "pvc.yaml":
+                if "postgresql" in content:
+                    found_lines.append((0, "PostgreSQL PVC")) # Dummy line number, actual removal is file deletion
+
+            # Scan for db_name in all files, including YAMLs (for values.yaml, etc.) and source files
             for i, line in enumerate(content.splitlines()):
                 if re.search(r'\b' + re.escape(self.db_name) + r'\b', line):
                     found_lines.append((i + 1, line.strip()))
+            if found_lines:
+                logging.debug(f"Found references in {file_path.name}: {found_lines}")
         except Exception as e:
             logging.warning(f"Could not read file {file_path}: {e}")
         return found_lines
@@ -69,14 +89,87 @@ class PostgreSQLDecommissionTool:
         Removes references to the database name from a single file.
         This is a destructive operation and should only be called if self.remove is True.
         """
-        original_content = file_path.read_text(encoding='utf-8')
-        new_content = re.sub(r'\b' + re.escape(self.db_name) + r'\b', '', original_content)
-        if original_content != new_content:
+        relative_path = file_path.relative_to(self.repo_path)
+
+        if file_path.name == "pvc.yaml" and ("postgresql" in file_path.read_text() or self.db_name in file_path.read_text()):
             if not self.dry_run:
-                file_path.write_text(new_content, encoding='utf-8')
-                logging.info(f"Removed references from {file_path.relative_to(self.repo_path)}")
+                file_path.unlink()
+                logging.info(f"Deleted {relative_path} as it contained references to {self.db_name}")
             else:
-                logging.info(f"Dry run: Would remove references from {file_path.relative_to(self.repo_path)}")
+                logging.info(f"Dry run: Would delete {relative_path} as it contains references to {self.db_name}")
+            return
+
+        if file_path.suffix in self.constraints['yaml_extensions']:
+            try:
+                with file_path.open('r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+                
+                modified = False
+                if file_path.name == "Chart.yaml" and 'dependencies' in data:
+                    logging.debug(f"Processing Chart.yaml: {relative_path}")
+                    initial_len = len(data['dependencies'])
+                    logging.debug(f"Initial dependencies: {data['dependencies']}")
+                    data['dependencies'] = [dep for dep in data['dependencies'] if dep.get('name') != 'postgresql']
+                    logging.debug(f"Dependencies after filtering: {data['dependencies']}")
+                    if len(data['dependencies']) < initial_len:
+                        modified = True
+                        logging.debug("Chart.yaml modified flag set to True.")
+
+                if file_path.name == "values.yaml":
+                    if 'postgresql' in data and self.db_name in str(data['postgresql']):
+                        del data['postgresql']
+                        modified = True
+                    if 'database' in data and data['database'].get('name') == self.db_name:
+                        del data['database']
+                        modified = True
+
+                if modified:
+                    logging.debug(f"File {relative_path} was modified. Dry run: {self.dry_run}")
+                    if not self.dry_run:
+                        with file_path.open('w', encoding='utf-8') as f:
+                            yaml.dump(data, f, sort_keys=False)
+                        logging.info(f"Removed references from {relative_path} (YAML)")
+                    else:
+                        logging.info(f"Dry run: Would remove references from {relative_path} (YAML)")
+                elif self.db_name in file_path.read_text(encoding='utf-8'): # Fallback for YAML files if not handled by specific logic
+                    original_content = file_path.read_text(encoding='utf-8')
+                    new_content = re.sub(r'\b' + re.escape(self.db_name) + r'\b', '', original_content)
+                    if original_content != new_content:
+                        if not self.dry_run:
+                            file_path.write_text(new_content, encoding='utf-8')
+                            logging.info(f"Removed references from {relative_path}")
+                        else:
+                            logging.info(f"Dry run: Would remove references from {relative_path}")
+
+            except yaml.YAMLError as e:
+                logging.warning(f"Could not parse YAML file {relative_path}: {e}. Attempting regex replacement.")
+                original_content = file_path.read_text(encoding='utf-8')
+                new_content = re.sub(r'\b' + re.escape(self.db_name) + r'\b', '', original_content)
+                if original_content != new_content:
+                    if not self.dry_run:
+                        file_path.write_text(new_content, encoding='utf-8')
+                        logging.info(f"Removed references from {relative_path}")
+                    else:
+                        logging.info(f"Dry run: Would remove references from {relative_path}")
+            except Exception as e:
+                logging.warning(f"Error processing {relative_path}: {e}. Attempting regex replacement.")
+                original_content = file_path.read_text(encoding='utf-8')
+                new_content = re.sub(r'\b' + re.escape(self.db_name) + r'\b', '', original_content)
+                if original_content != new_content:
+                    if not self.dry_run:
+                        file_path.write_text(new_content, encoding='utf-8')
+                        logging.info(f"Removed references from {relative_path}")
+                    else:
+                        logging.info(f"Dry run: Would remove references from {relative_path}")
+        else:
+            original_content = file_path.read_text(encoding='utf-8')
+            new_content = re.sub(r'\b' + re.escape(self.db_name) + r'\b', '', original_content)
+            if original_content != new_content:
+                if not self.dry_run:
+                    file_path.write_text(new_content, encoding='utf-8')
+                    logging.info(f"Removed references from {relative_path}")
+                else:
+                    logging.info(f"Dry run: Would remove references from {relative_path}")
 
     def remove_references(self) -> None:
         """
@@ -220,11 +313,17 @@ def main():
             logging.info("Operation cancelled by user.")
             sys.exit(0)
 
+    repo_path_obj = Path(args.repo_path)
+    if not repo_path_obj.exists() or not repo_path_obj.is_dir():
+        logging.error(f"Error: The provided repository path '{args.repo_path}' does not exist or is not a directory.")
+        sys.exit(1)
+
     if args.release_name:
         tool = HelmDecommissionTool(args.repo_path, args.db_name, args.release_name, args.remove, args.dry_run)
     else:
         tool = PostgreSQLDecommissionTool(args.repo_path, args.db_name, args.remove, args.dry_run)
 
+    # Remove debug prints
     report = tool.run()
 
     logging.info("\n--- Decommissioning Report ---")
