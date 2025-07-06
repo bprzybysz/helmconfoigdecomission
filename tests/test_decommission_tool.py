@@ -129,10 +129,11 @@ class TestPostgreSQLDecommissionTool:
     def test_scan_repository(self, repo_with_references):
         tool = PostgreSQLDecommissionTool(str(repo_with_references), "my-test-db")
         tool.scan_repository()
-        assert len(tool.findings) == 4 # database.yml, main.go, values.yaml, README.md
+        assert len(tool.findings) == 5 # database.yml, main.go, values.yaml, README.md, Chart.yaml
         assert "config/database.yml" in tool.findings
         assert "src/main.go" in tool.findings
         assert "charts/values.yaml" in tool.findings
+        assert "charts/Chart.yaml" in tool.findings
         assert "README.md" in tool.findings
 
     def test_remove_references_dry_run(self, repo_with_references):
