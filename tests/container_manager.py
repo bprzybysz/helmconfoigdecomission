@@ -1,98 +1,167 @@
+import asyncio
 import subprocess
 import time
 import logging
+import pytest
 from pathlib import Path
+from typing import List, Dict, Any
 
-class ContainerManager:
+logger = logging.getLogger(__name__)
+
+class AsyncContainerManager:
+    """Async container lifecycle management for E2E tests."""
+    
+    def __init__(self, compose_file: Path, service_name: str = "mcp-server"):
+        self.compose_file = compose_file
+        self.service_name = service_name
+        self.container_name = f"helmconfoigdecomission_{service_name}_1"
+        self._is_running = False
+
+    async def __aenter__(self):
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.cleanup()
+
+    async def start(self) -> None:
+        """Build and start containers asynchronously."""
+        logger.info("🚀 Starting container environment...")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "podman-compose", "-f", str(self.compose_file),
+                "up", "--build", "-d",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                raise RuntimeError(f"Container startup failed: {stderr.decode()}")
+                
+            await self._wait_for_ready()
+            self._is_running = True
+            logger.info("✅ Container environment ready")
+            
+        except Exception as e:
+            logger.error(f"Failed to start containers: {e}")
+            raise RuntimeError(f"Container startup failed: {e}")
+
+    async def cleanup(self) -> None:
+        """Clean shutdown asynchronously."""
+        if not self._is_running:
+            return
+        logger.info("🧹 Cleaning up containers...")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "podman-compose", "-f", str(self.compose_file),
+                "down", "-v", "--remove-orphans",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.communicate()
+        except Exception as e:
+            logger.warning(f"Cleanup warning: {e}")
+        finally:
+            self._is_running = False
+
+    async def _wait_for_ready(self, timeout: int = 30) -> None:
+        """Wait for container to be ready asynchronously."""
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "podman", "ps", "--filter", f"name={self.container_name}",
+                    "--format", "{{.Names}}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if self.container_name in stdout.decode():
+                    try:
+                        await self.execute(["python", "--version"])
+                        return
+                    except RuntimeError:
+                        # Container exists but not ready, continue waiting
+                        pass
+                    
+            except Exception:
+                # Any subprocess error, continue waiting
+                pass
+            
+            await asyncio.sleep(1)
+            
+        raise TimeoutError(f"Container {self.container_name} failed to become ready within {timeout}s")
+
+    async def execute(self, command: List[str]) -> str:
+        """Execute command in container asynchronously."""
+        if not self._is_running:
+            raise RuntimeError("Container is not running")
+        
+        full_command = ["podman", "exec", self.container_name] + command
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *full_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                logger.error(f"Command failed: {' '.join(command)}")
+                logger.error(f"Stderr: {stderr.decode()}")
+                raise RuntimeError(f"Container command failed: {stderr.decode()}")
+                
+            return stdout.decode()
+            
+        except Exception as e:
+            logger.error(f"Command execution failed: {e}")
+            raise RuntimeError(f"Container command failed: {e}")
+
+class AsyncE2ETestSuite:
+    """Helper for async E2E test suites."""
+    
     def __init__(self, compose_file: Path):
         self.compose_file = compose_file
-        self.container_name = "mcp-server"
+        self.results: List[Dict[str, Any]] = []
+
+    async def run_test_scenario(self, name: str, test_func, *args, **kwargs) -> Dict[str, Any]:
+        """Run a single test scenario asynchronously."""
+        logger.info(f"🧪 Running test scenario: {name}")
         
-    def __enter__(self):
-        self.start()
-        return self
+        result = {
+            "name": name,
+            "success": False,
+            "error": None,
+            "duration": 0
+        }
         
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
+        start_time = asyncio.get_event_loop().time()  # ✅ Non-blocking time
+        
+        try:
+            async with AsyncContainerManager(self.compose_file) as container:
+                await test_func(container, *args, **kwargs)
+                result["success"] = True
+                logger.info(f"✅ Test scenario '{name}' passed")
+                
+        except Exception as e:
+            result["error"] = str(e)
+            logger.error(f"❌ Test scenario '{name}' failed: {e}")
+        
+        finally:
+            result["duration"] = asyncio.get_event_loop().time() - start_time
+            self.results.append(result)
+        
+        return result
     
-    def start(self):
-        """Build and start container"""
-        logging.info("🚀 Starting E2E container environment...")
-        
-        try:
-            # Build and run in detached mode
-            subprocess.run(
-                ["docker-compose", "-f", str(self.compose_file), "up", "-d", "--build"],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            logging.info("Container started successfully.")
-            self._wait_for_container_ready()
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error starting container: {e.stderr}")
-            raise
-
-    def _wait_for_container_ready(self, timeout=120, interval=5):
-        logging.info(f"Waiting for container '{self.container_name}' to be ready...")
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            try:
-                # Check if the container is running and healthy
-                result = subprocess.run(
-                    ["docker-compose", "-f", str(self.compose_file), "ps", "-q", self.container_name],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-                container_id = result.stdout.strip()
-                if container_id:
-                    health_status = subprocess.run(
-                        ["docker", "inspect", "--format", "{{.State.Health.Status}}", container_id],
-                        check=True,
-                        capture_output=True,
-                        text=True
-                    ).stdout.strip()
-                    if health_status == "healthy":
-                        logging.info(f"Container '{self.container_name}' is healthy.")
-                        return
-                    elif health_status == "unhealthy":
-                        logging.error(f"Container '{self.container_name}' is unhealthy.")
-                        raise RuntimeError(f"Container '{self.container_name}' is unhealthy.")
-                logging.info(f"Container '{self.container_name}' not yet healthy. Retrying in {interval} seconds...")
-            except subprocess.CalledProcessError as e:
-                logging.warning(f"Could not check container status: {e.stderr}")
-            except Exception as e:
-                logging.warning(f"An unexpected error occurred while waiting for container: {e}")
-            time.sleep(interval)
-        raise TimeoutError(f"Container '{self.container_name}' did not become healthy within {timeout} seconds.")
-
-    def cleanup(self):
-        """Stop and remove container"""
-        logging.info("🧹 Cleaning up E2E container environment...")
-        try:
-            subprocess.run(
-                ["docker-compose", "-f", str(self.compose_file), "down", "-v"],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            logging.info("Container environment cleaned up.")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error cleaning up container: {e.stderr}")
-            raise
-
-    def get_container_ip(self):
-        """Get the IP address of the running container."""
-        try:
-            result = subprocess.run(
-                ["docker", "inspect", "-f", "{{ .NetworkSettings.IPAddress }}", self.container_name],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error getting container IP: {e.stderr}")
-            raise
-
+    def get_summary(self) -> Dict[str, Any]:
+        """Get test suite summary."""
+        total = len(self.results)
+        failed = sum(1 for r in self.results if not r["success"])
+        return {
+            "total": total,
+            "passed": total - failed,
+            "failed": failed,
+            "success_rate": (total - failed) / total if total > 0 else 0
+        }

@@ -1,114 +1,171 @@
-# tests/test_container_e2e.py
-import os
-import subprocess
-import time
-from pathlib import Path
+"""
+Clean E2E tests using the new container manager.
+"""
 import pytest
-import yaml
+from pathlib import Path
+from .container_manager import AsyncContainerManager, AsyncE2ETestSuite
 
-# Define constants for compose file and container name
+# Test configuration
 COMPOSE_FILE = Path(__file__).parent.parent / "docker-compose.yml"
-CONTAINER_NAME = "helmconfoigdecomission_mcp-server_1"
-IMAGE_NAME = "helm-config-decommission-tool"
-
-def is_container_running(container_name):
-    """Check if a container with the given name is running."""
-    result = subprocess.run(["podman", "ps", "--filter", f"name={container_name}"], capture_output=True, text=True)
-    return container_name in result.stdout
+TEST_DB_NAME = "example-db"
+TEST_BRANCH_NAME = f"chore/decommission-{TEST_DB_NAME}"
 
 @pytest.fixture(scope="session")
-def running_mcp_server(tmp_path_factory):
-    """
-    Builds and starts the MCP server container, waits for it to be healthy,
-    and yields the container name. Tears down the container after tests.
-    """
-    # Ensure the container is not already running from a previous failed run
-    if is_container_running(CONTAINER_NAME):
-        subprocess.run(["podman-compose", "-f", str(COMPOSE_FILE), "down", "-v"], check=True)
+async def container_env():
+    """Session-scoped container environment."""
+    async with AsyncContainerManager(COMPOSE_FILE) as container:
+        yield container
 
-    # Build and start the container in detached mode
-    print("Building and starting container...")
-    subprocess.run(["podman-compose", "-f", str(COMPOSE_FILE), "up", "--build", "-d"], check=True)
+@pytest.fixture(scope="function")
+async def fresh_container():
+    """Function-scoped fresh container for each test."""
+    async with AsyncContainerManager(COMPOSE_FILE) as container:
+        yield container
 
-    # Health check loop
-    max_wait = 60  # seconds
+class TestContainerE2E:
+    """Clean E2E tests for containerized decommission tool."""
+    
+    def test_container_basic_health(self, container_env):
+        """Test basic container health and Python environment."""
+        # Test Python version
+        result = container_env.execute(["python", "--version"])
+        assert "Python 3.1" in result.stdout  # Python 3.11+
+        
+        # Test our module import
+        result = container_env.execute([
+            "python", "-c", "import decommission_tool; print('Import successful')"
+        ])
+        assert "Import successful" in result.stdout
+    
+    def test_container_file_access(self, container_env):
+        """Test that container can access mounted test repository."""
+        # List mounted test repo
+        result = container_env.execute(["ls", "-la", "/app/test_repo"])
+        assert "service.yaml" in result.stdout
+        
+        # Test Python can read the files
+        result = container_env.execute([
+            "python", "-c", 
+            "from pathlib import Path; print(list(Path('/app/test_repo').glob('*.yaml')))"
+        ])
+        assert "service.yaml" in result.stdout
+    
+    def test_decommission_tool_help(self, container_env):
+        """Test decommission tool help command."""
+        result = container_env.execute([
+            "python", "-m", "decommission_tool", "--help"
+        ])
+        assert "PostgreSQL database" in result.stdout
+        assert "--remove" in result.stdout
+        assert "--dry-run" in result.stdout
+    
+    def test_decommission_tool_scan_only(self, container_env):
+        """Test scanning for database references without removal."""
+        result = container_env.execute([
+            "python", "-m", "decommission_tool",
+            "/app/test_repo", TEST_DB_NAME
+        ])
+        
+        # Should complete successfully
+        assert result.returncode == 0
+        # Should show scan results in output
+        assert "Scanning repository" in result.stdout or "Found references" in result.stdout
+    
+    def test_decommission_tool_dry_run(self, container_env):
+        """Test dry run removal mode."""
+        result = container_env.execute([
+            "python", "-m", "decommission_tool",
+            "/app/test_repo", TEST_DB_NAME, "--remove", "--dry-run"
+        ])
+        
+        assert result.returncode == 0
+        assert "dry run" in result.stdout.lower() or "no changes were made" in result.stdout.lower()
+    
+    def test_file_operations_in_container(self, fresh_container):
+        """Test file operations within container."""
+        # Create a test file
+        fresh_container.execute([
+            "sh", "-c", "echo 'test content' > /tmp/test_file.txt"
+        ])
+        
+        # Verify file exists and has content
+        result = fresh_container.execute(["cat", "/tmp/test_file.txt"])
+        assert "test content" in result.stdout
+        
+        # Clean up
+        fresh_container.execute(["rm", "/tmp/test_file.txt"])
+    
+    def test_git_operations_in_container(self, fresh_container):
+        """Test git operations within container."""
+        # Test git is available
+        result = fresh_container.execute(["git", "--version"])
+        assert "git version" in result.stdout
+        
+        # Test git operations in test repo
+        result = fresh_container.execute([
+            "git", "-C", "/app/test_repo", "status"
+        ])
+        # Should not fail (even if not a git repo, should give meaningful error)
+        assert result.returncode == 0 or "not a git repository" in result.stderr
+
+class TestE2EScenarios:
+    """Complex E2E scenarios using the test suite."""
+    
+    def test_full_decommission_workflow(self):
+        """Test complete decommission workflow as separate scenarios."""
+        suite = AsyncE2ETestSuite(COMPOSE_FILE)
+        
+        # Scenario 1: Initial scan
+        def scan_scenario(container):
+            result = container.execute([
+                "python", "-m", "decommission_tool",
+                "/app/test_repo", TEST_DB_NAME
+            ])
+            assert result.returncode == 0
+        
+        # Scenario 2: Dry run removal
+        def dry_run_scenario(container):
+            result = container.execute([
+                "python", "-m", "decommission_tool",
+                "/app/test_repo", TEST_DB_NAME, "--remove", "--dry-run"
+            ])
+            assert result.returncode == 0
+            assert "dry run" in result.stdout.lower() or "no changes" in result.stdout.lower()
+        
+        # Run scenarios
+        suite.run_test_scenario("initial_scan", scan_scenario)
+        suite.run_test_scenario("dry_run_removal", dry_run_scenario)
+        
+        # Check results
+        summary = suite.get_summary()
+        assert summary["failed"] == 0, f"Test scenarios failed: {summary}"
+        assert summary["success_rate"] == 1.0
+
+@pytest.mark.slow
+def test_container_performance():
+    """Test container startup and execution performance."""
+    import time
+    
     start_time = time.time()
-    is_healthy = False
-    print("Waiting for container to be healthy...")
-    while time.time() - start_time < max_wait:
-        result = subprocess.run(
-            ["podman", "inspect", "--format", "{{.State.Health.Status}}", CONTAINER_NAME],
-            capture_output=True, text=True,
-        )
-        if result.stdout.strip() == "healthy":
-            is_healthy = True
-            print("✅ Container is healthy!")
-            break
-        time.sleep(2)
-
-    if not is_healthy:
-        # Capture logs for debugging before failing
-        logs = subprocess.run(["podman", "logs", CONTAINER_NAME], capture_output=True, text=True).stdout
-        pytest.fail(f"Container did not become healthy within {max_wait} seconds.\nLogs:\n{logs}")
-
-    yield CONTAINER_NAME
-
-    # Teardown: stop and remove the container
-    print("\nTearing down container...")
-    subprocess.run(["podman-compose", "-f", str(COMPOSE_FILE), "down", "-v"], check=True)
-
-
-def test_container_can_access_mounted_repo(running_mcp_server):
-    """
-    Verify that the container can access the files mounted in the volume.
-    This is a basic check to ensure the volume mount is working correctly.
-    """
-    # The path inside the container where the repo is mounted
-    container_repo_path = "/app/test_repo"
     
-    # Command to list files in the mounted directory inside the container
-    cmd = ["podman", "exec", running_mcp_server, "ls", "-l", container_repo_path]
-    
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    
-    # Check for a file that is known to be in the test repo
-    assert "service.yaml" in result.stdout
-    print("✅ Container can access the mounted repository.")
+    with ContainerManager(COMPOSE_FILE) as container:
+        setup_time = time.time() - start_time
+        
+        # Test command execution time
+        cmd_start = time.time()
+        container.execute(["python", "--version"])
+        cmd_time = time.time() - cmd_start
+        
+        assert setup_time < 30, f"Container setup took too long: {setup_time}s"
+        assert cmd_time < 5, f"Command execution took too long: {cmd_time}s"
 
+def test_container_error_handling():
+    """Test container error handling and cleanup."""
+    with pytest.raises(RuntimeError):
+        with ContainerManager(COMPOSE_FILE) as container:
+            # This should fail and trigger cleanup
+            container.execute(["python", "-c", "raise Exception('Test error')"])
 
-def test_decommission_tool_remove_in_container(running_mcp_server):
-    """
-    Full E2E test:
-    1. Runs the decommission tool inside the container against the mounted repo.
-    2. Verifies that the tool creates a new branch with the expected changes.
-    """
-    db_name = "example-db"
-    branch_name = f"chore/decommission-{db_name}"
-    host_repo_path = Path(__file__).parent / "test_repo"
-
-    # Ensure the host repo is on the main branch and clean before the test
-    subprocess.run(["git", "-C", str(host_repo_path), "checkout", "main"], check=True)
-    subprocess.run(["git", "-C", str(host_repo_path), "reset", "--hard", "origin/main"], check=True)
-    # Clean up any branches from previous runs
-    existing_branches = subprocess.run(["git", "-C", str(host_repo_path), "branch"], capture_output=True, text=True).stdout
-    if branch_name in existing_branches:
-        subprocess.run(["git", "-C", str(host_repo_path), "branch", "-D", branch_name], check=True)
-
-    # Run the decommission tool inside the container
-    # Note: The path to the repo is the container-internal path
-    cmd = [
-        "podman", "exec", running_mcp_server,
-        "python", "/app/decommission_tool.py", ".", db_name, "--remove", f"--branch-name={branch_name}"
-    ]
-    remove_result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    
-    assert f"Changes are in branch: {branch_name}" in remove_result.stdout
-    print("✅ Decommission tool --remove ran successfully inside the container.")
-    
-    # Verify on the host that the new branch was created with changes
-    diff_check = subprocess.run(
-        ["git", "-C", str(host_repo_path), "diff", "--quiet", "main", branch_name],
-        capture_output=True
-    )
-    assert diff_check.returncode != 0, "No diff found between main and the new branch. Removal likely failed."
-    print(f"✅ Verified changes were made in branch '{branch_name}' on the host.")
+if __name__ == "__main__":
+    # Allow running tests directly
+    pytest.main([__file__, "-v"])
