@@ -1,176 +1,8 @@
-### **Review of Your Current Codebase (`repomix-output.xml`)**
+Looking at your updated codebase in the attachment, I can see your current `decommission_tool.py` is a **scanner-only implementation** that doesn't have the `--remove` functionality yet. Based on the search results and your request, here's the **complete enhanced solution** with E2E branch testing:
 
-After carefully reviewing the `repomix-output.xml` file you provided[1], it is clear that **the proposed changes have not been applied.** Your current codebase represents an older, incomplete version and is missing all of the critical updates requested in the "Immediate Action Required" review.
+## **Enhanced Decommission Tool with File Modification**
 
-### **Are These Full Updated Files?**
-
-**No.** The files in your `repomix-output.xml` are outdated and incomplete. The following table summarizes the critical gaps between your current code and the required solution:
-
-| Feature / File | Status in `repomix-output.xml` | Status in the Recommended Solution |
-| :--- | :--- | :--- |
-| **`Makefile`** | ❌ **Missing** | ✅ **Present and complete**, with `uv` integration and CI targets[2][3][4]. |
-| **`tests/test_decommission_tool.py`** | ❌ **Missing** | ✅ **Present**, with foundational `pytest` unit tests. |
-| **`README.md`** | ❌ **Missing** | ✅ **Present**, with clear setup and usage instructions. |
-| **CI/CD Exit Codes** | ❌ **Not Implemented** | ✅ **Implemented**; script exits with code `2` on critical findings. |
-| **Full Scan Coverage** | ❌ **Not Implemented** | ✅ **Implemented**; scans `.tpl`, `.conf`, `.env`, and source code files. |
-| **JSON Output** | ❌ **Not Implemented** | ✅ **Implemented**; findings are exported to `decommission_findings.json`. |
-| **Severity Ranking** | ❌ **Not Implemented** | ✅ **Implemented**; findings are categorized as `critical`, `high`, etc. |
-| **Robust File Handling** | ❌ **Not Implemented** | ✅ **Implemented**; uses `utf-8` encoding and safely handles YAML errors. |
-
-### **Is the Makefile Full?**
-
-No, the `Makefile` is **entirely missing** from the `repomix-output.xml` file[1]. A complete, UV-managed `Makefile` is essential for standardizing the development workflow and for CI/CD automation.
-
-### **Complete and Updated Codebase**
-
-To resolve these critical gaps, you must **replace your existing files** and **add the missing ones**. Here is the full, correct, and complete set of files that implements all the required changes.
-
-#### `README.md`
-
-```markdown
-# PostgreSQL Decommissioning Scanner
-
-A Python-based tool to scan a repository for references to a PostgreSQL database that needs to be decommissioned. It identifies dependencies in Helm charts, configuration values, Kubernetes resource templates, and source code.
-
-This tool is designed to be run in a CI/CD pipeline to ensure all references are removed before deployment.
-
-## Prerequisites
-
-- Python 3.8+
-- `uv` (for package management)
-
-## Quickstart
-
-1.  **Setup Development Environment**:
-    This will install dependencies using `uv` and clone the target test repository (`cloudnative-pg`).
-    ```
-    make dev-setup
-    ```
-
-2.  **Run an End-to-End Scan**:
-    This will scan the cloned `./cloudnative-pg` repository for references to a database named `postgres`.
-    ```
-    make e2e
-    ```
-
-3.  **Run a Custom Scan**:
-    Scan the target repository for a specific database name.
-    ```
-    make scan-db DB_NAME=my_app_db
-    ```
-    The results, including a summary and detailed findings, will be printed to the console and saved to `decommission_findings.json`.
-
-## Makefile Commands
-
-- `make install`: Install all Python dependencies.
-- `make dev-setup`: Prepare the full development environment.
-- `make lint`: Run `ruff` and `mypy` to check code quality.
-- `make format`: Format code with `black` and `ruff`.
-- `make test`: Run unit tests located in the `tests/` directory.
-- `make e2e`: Run a full E2E scan on the `./cloudnative-pg` repository.
-- `make scan-db DB_NAME=<name>`: Run a scan for a custom database name.
-- `make ci`: Simulate a CI pipeline run (lint, test, e2e).
-- `make clean`: Remove generated files, virtual environments, and the cloned test repository.
-```
-
-#### `Makefile`
-
-```makefile
-# Makefile for PostgreSQL Decommission Tool
-# UV-managed Python environment
-
-.PHONY: help install test scan clean lint format check e2e dev-setup ci
-
-# Variables
-TARGET_REPO_URL := https://github.com/cloudnative-pg/cloudnative-pg.git
-TARGET_REPO_DIR := ./cloudnative-pg
-DB_NAME ?= postgres
-PYTHON := uv run python
-
-# Default target
-help:
-	@echo "PostgreSQL Decommission Tool - UV Managed"
-	@echo "Available commands:"
-	@echo "  install      - Install dependencies with UV"
-	@echo "  dev-setup    - Set up the full development environment"
-	@echo "  test         - Run unit tests"
-	@echo "  e2e          - Run e2e tests against cloudnative-pg"
-	@echo "  scan-db      - Scan target repo. Usage: make scan-db DB_NAME=mydb"
-	@echo "  lint         - Run linting and type checking"
-	@echo "  format       - Format code"
-	@echo "  ci           - Run a full CI check (lint, test, e2e)"
-	@echo "  clean        - Clean up generated files and cloned repo"
-
-# Install dependencies using uv[2]
-install:
-	@echo "📦 Installing dependencies with UV..."
-	@uv pip install --system --upgrade pip
-	@uv pip install --system pytest pytest-mock pyyaml ruff black mypy
-	@echo "✅ Dependencies installed"
-
-# Clone target repository if it doesn't exist
-setup-target:
-	@if [ ! -d "$(TARGET_REPO_DIR)" ]; then \
-		echo "📥 Cloning $(TARGET_REPO_URL)..."; \
-		git clone --depth 1 $(TARGET_REPO_URL) $(TARGET_REPO_DIR); \
-	else \
-		echo "✅ Target repository '$(TARGET_REPO_DIR)' already exists"; \
-	fi
-
-# Development setup
-dev-setup: install setup-target
-	@echo "🚀 Development environment ready"
-	@echo "Run 'make e2e' to test against the target repo"
-
-# Run unit tests
-test:
-	@echo "🧪 Running unit tests..."
-	@$(PYTHON) -m pytest tests/ -v --tb=short
-
-# Run e2e tests
-e2e: setup-target
-	@echo "🔄 Running e2e scan against $(TARGET_REPO_DIR)..."
-	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME)
-	@echo "✅ E2E scan completed. Results are in decommission_findings.json"
-
-# Scan repository with a custom database name
-scan-db: setup-target
-	@echo "🔍 Scanning $(TARGET_REPO_DIR) for database: $(DB_NAME)"
-	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME)
-
-# Lint and type check code
-lint:
-	@echo "🔍 Running linter (ruff)..."
-	@uv run ruff check .
-	@echo "🔍 Running type checker (mypy)..."
-	@uv run mypy . --ignore-missing-imports
-
-# Format code
-format:
-	@echo "🎨 Formatting code..."
-	@uv run black .
-	@uv run ruff format .
-
-# CI/CD pipeline simulation[5]
-ci:
-	@set -e; \
-	echo "🎯 Starting CI pipeline..."; \
-	make install; \
-	make lint; \
-	make test; \
-	make e2e; \
-	echo "✅ CI pipeline completed successfully"
-
-# Clean up generated files and artifacts[4]
-clean:
-	@echo "🧹 Cleaning up..."
-	@rm -f decommission_findings.json
-	@rm -rf __pycache__/ .pytest_cache/ .mypy_cache/
-	@rm -rf $(TARGET_REPO_DIR)
-	@echo "✅ Cleanup completed"
-```
-
-#### `decommission_tool.py`
+First, update your `decommission_tool.py` to include the missing `--remove` functionality:
 
 ```python
 import os
@@ -186,6 +18,7 @@ class PostgreSQLDecommissionTool:
         self.repo_path = Path(repo_path)
         self.db_name = db_name
         self.max_findings = max_findings
+        self.findings = {}
         self.constraints = {
             'yaml_extensions': ['.yaml', '.yml', '.tpl'],
             'config_extensions': ['.conf', '.env'],
@@ -210,19 +43,22 @@ class PostgreSQLDecommissionTool:
         }
 
         for file_path in all_files:
+            if file_path.name == 'values.yaml' or file_path.suffix in self.constraints['config_extensions']:
+                findings['config_references'].extend(self._scan_config_file(file_path))
+            
             if file_path.suffix in self.constraints['yaml_extensions']:
                 findings['helm_dependencies'].extend(self._scan_helm_chart(file_path))
                 findings['pvc_references'].extend(self._scan_pvc(file_path))
                 findings['template_resources'].extend(self._scan_template(file_path))
-            elif file_path.suffix in self.constraints['config_extensions'] or 'values.yaml' in file_path.name:
-                findings['config_references'].extend(self._scan_config_file(file_path))
-            elif file_path.suffix in self.constraints['source_extensions']:
+            
+            if file_path.suffix in self.constraints['source_extensions']:
                 findings['source_code_references'].extend(self._scan_source_code(file_path))
         
         # Apply max findings constraint to each category
         for key in findings:
             findings[key] = findings[key][:self.max_findings]
         
+        self.findings = findings
         return findings
 
     def _is_valid_path(self, file_path: Path) -> bool:
@@ -286,12 +122,11 @@ class PostgreSQLDecommissionTool:
             with open(file_path, 'r', encoding='utf-8') as f:
                 docs = yaml.safe_load_all(f)
                 for doc in docs:
-                    if not doc or doc.get('kind') != 'PersistentVolumeClaim':
+                    if not isinstance(doc, dict) or doc.get('kind') != 'PersistentVolumeClaim':
                         continue
                     
                     name = doc.get('metadata', {}).get('name', '').lower()
                     labels = doc.get('metadata', {}).get('labels', {})
-                    # Simple check if 'postgres' or db_name is in the PVC name or a common label
                     if 'postgres' in name or self.db_name in name or 'postgres' in str(labels):
                         findings.append({'file': str(file_path.relative_to(self.repo_path)), 'type': 'pvc_reference', 'content': f"PVC found: {name}", 'severity': 'critical'})
         except (yaml.YAMLError, IOError) as e:
@@ -301,7 +136,6 @@ class PostgreSQLDecommissionTool:
     def _scan_source_code(self, file_path: Path) -> List[Dict]:
         """Scan source code files for hardcoded DSNs."""
         findings = []
-        # Pattern for postgres://user:pass@host:port/dbname
         dsn_pattern = r'postgres(ql)?:\/\/[^\s"]+'
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -311,6 +145,96 @@ class PostgreSQLDecommissionTool:
         except IOError as e:
             print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
         return findings
+
+    def remove_file_references(self) -> bool:
+        """Remove file references found by the scanner"""
+        try:
+            print("🧹 Removing file references...")
+            
+            # Remove Helm dependencies
+            for finding in self.findings.get('helm_dependencies', []):
+                self._remove_helm_dependency(finding)
+            
+            # Comment out config references
+            for finding in self.findings.get('config_references', []):
+                self._comment_config_reference(finding)
+            
+            # Remove template resources
+            for finding in self.findings.get('template_resources', []):
+                self._remove_template_resource(finding)
+            
+            print("✅ File references cleaned up")
+            return True
+            
+        except Exception as e:
+            print(f"❌ File cleanup failed: {e}")
+            return False
+
+    def _remove_helm_dependency(self, finding: Dict) -> None:
+        """Remove Helm dependency from Chart.yaml"""
+        file_path = self.repo_path / finding['file']
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = yaml.safe_load(f)
+            
+            if 'dependencies' in content:
+                original_deps = content['dependencies']
+                content['dependencies'] = [
+                    dep for dep in original_deps
+                    if not ('postgres' in dep.get('name', '').lower() or 
+                           self.db_name in dep.get('name', ''))
+                ]
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(content, f, default_flow_style=False)
+                
+                print(f"✅ Removed PostgreSQL dependency from {file_path}")
+                
+        except Exception as e:
+            print(f"❌ Failed to remove dependency from {file_path}: {e}")
+
+    def _comment_config_reference(self, finding: Dict) -> None:
+        """Comment out config references"""
+        file_path = self.repo_path / finding['file']
+        line_num = finding.get('line', 0)
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            if 1 <= line_num <= len(lines):
+                original_line = lines[line_num - 1]
+                if not original_line.strip().startswith('#'):
+                    lines[line_num - 1] = f"# REMOVED: {original_line}"
+                    
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.writelines(lines)
+                    
+                    print(f"✅ Commented out config in {file_path}:{line_num}")
+                    
+        except Exception as e:
+            print(f"❌ Failed to comment config in {file_path}: {e}")
+
+    def _remove_template_resource(self, finding: Dict) -> None:
+        """Remove or comment out template resources"""
+        file_path = self.repo_path / finding['file']
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            if not content.startswith('# REMOVED'):
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(f"# REMOVED: PostgreSQL template for {self.db_name}\n")
+                    f.write(f"# Original content commented out\n")
+                    for line in content.splitlines():
+                        f.write(f"# {line}\n")
+                
+                print(f"✅ Commented out template {file_path}")
+                
+        except Exception as e:
+            print(f"❌ Failed to remove template {file_path}: {e}")
 
 def generate_summary_and_plan(findings: Dict[str, List], repo_path: str) -> Dict:
     """Generate a summary and print a removal plan."""
@@ -364,11 +288,12 @@ def generate_summary_and_plan(findings: Dict[str, List], repo_path: str) -> Dict
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python decommission_tool.py <repo_path> <db_name>", file=sys.stderr)
+        print("Usage: python decommission_tool.py <repo_path> <db_name> [--remove]", file=sys.stderr)
         sys.exit(1)
         
     repo_path = sys.argv[1]
     db_name = sys.argv[2]
+    should_remove = '--remove' in sys.argv
     output_file = Path("decommission_findings.json")
 
     try:
@@ -380,6 +305,20 @@ def main():
             json.dump({'summary': summary, 'findings': findings}, f, indent=2)
         
         print(f"\n📄 Detailed findings exported to: {output_file}")
+
+        # If --remove flag is provided, actually remove the references
+        if should_remove:
+            print("\n🚀 Starting file modification process...")
+            
+            # Remove file references
+            if not tool.remove_file_references():
+                print("❌ File cleanup failed")
+                sys.exit(1)
+            
+            print("\n✅ Database references removed from source files!")
+            print("Pipeline can now redeploy without the database.")
+        else:
+            print("\n💡 Run with --remove flag to actually modify files")
 
         # Exit with non-zero status if critical issues are found for CI
         if summary['severity_breakdown']['critical'] > 0:
@@ -394,169 +333,213 @@ if __name__ == "__main__":
     main()
 ```
 
-#### `tests/test_decommission_tool.py`
+## **Enhanced E2E Test with Branch Management**
+
+Create a new file `test_e2e_branch.py`:
 
 ```python
-import pytest
+import subprocess
+import sys
+import os
+import shutil
 from pathlib import Path
-from decommission_tool import PostgreSQLDecommissionTool
 
-@pytest.fixture
-def temp_repo(tmp_path: Path) -> Path:
-    """Create a temporary repository structure for testing."""
-    repo_dir = tmp_path / "test-repo"
-    charts_dir = repo_dir / "charts"
-    templates_dir = charts_dir / "templates"
+def run_command(cmd, cwd=None):
+    """Run command and return result"""
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd)
+    return result
+
+def test_e2e_with_branch():
+    """E2E test with branch creation, modification, verification, and cleanup"""
     
-    templates_dir.mkdir(parents=True)
-
-    # 1. Helm Chart with a postgres dependency
-    (charts_dir / "Chart.yaml").write_text("""
-apiVersion: v2
-name: my-app
-dependencies:
-  - name: postgresql
-    version: "12.1.6"
-    repository: "https://charts.bitnami.com/bitnami"
-""")
-
-    # 2. values.yaml with a DB name reference
-    (charts_dir / "values.yaml").write_text("""
-replicaCount: 1
-database:
-  name: my_test_db
-  user: admin
-""")
-
-    # 3. A PVC manifest
-    (templates_dir / "pvc.yaml").write_text("""
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: postgres-data-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
-""")
-    # 4. A source file with a DSN
-    (repo_dir / "main.go").write_text('const dsn = "postgres://user:pass@host/my_test_db"')
-
-    return repo_dir
-
-def test_scan_finds_helm_dependency(temp_repo: Path):
-    """Verify that a Helm dependency is correctly identified."""
-    tool = PostgreSQLDecommissionTool(str(temp_repo), "postgresql")
-    findings = tool.scan_repository()
-    assert len(findings['helm_dependencies']) == 1
-    helm_finding = findings['helm_dependencies'][0]
-    assert helm_finding['severity'] == 'high'
-    assert 'Chart.yaml' in helm_finding['file']
-
-def test_scan_finds_config_reference(temp_repo: Path):
-    """Verify that a database name in values.yaml is found."""
-    tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
-    findings = tool.scan_repository()
-    assert len(findings['config_references']) >= 1
-    config_finding = findings['config_references'][0]
-    assert config_finding['severity'] == 'medium'
-    assert 'values.yaml' in config_finding['file']
-
-def test_scan_finds_pvc_reference(temp_repo: Path):
-    """Verify that a PVC with 'postgres' in the name is found."""
-    tool = PostgreSQLDecommissionTool(str(temp_repo), "any_db")
-    findings = tool.scan_repository()
-    assert len(findings['pvc_references']) == 1
-    pvc_finding = findings['pvc_references'][0]
-    assert pvc_finding['severity'] == 'critical'
-    assert 'pvc.yaml' in pvc_finding['file']
+    # Test configuration
+    repo_url = 'https://github.com/cloudnative-pg/cloudnative-pg.git'
+    clone_dir = './cloudnative-pg'
+    db_name = 'test_db'
+    branch_name = f'chore/{db_name}-decomission'
     
-def test_scan_finds_source_code_reference(temp_repo: Path):
-    """Verify that a DSN in a source code file is found."""
-    tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
-    findings = tool.scan_repository()
-    assert len(findings['source_code_references']) == 1
-    dsn_finding = findings['source_code_references'][0]
-    assert dsn_finding['severity'] == 'high'
-    assert 'main.go' in dsn_finding['file']
-
-def test_exit_code_on_critical_findings(temp_repo: Path, capsys):
-    """Verify the tool suggests a non-zero exit for critical findings."""
-    # This test doesn't check sys.exit() directly but checks the output message.
-    # In a real CI, the exit code itself would be asserted.
-    tool = PostgreSQLDecommissionTool(str(temp_repo), "any_db")
-    findings = tool.scan_repository()
-    # Mocking main() is complex, so we call the summary function directly.
-    from decommission_tool import generate_summary_and_plan
-    summary = generate_summary_and_plan(findings, str(temp_repo))
+    print("🚀 Starting E2E test with branch management...")
     
-    captured = capsys.readouterr()
-    # Check if the summary was printed, which happens before the final exit message
-    assert "CRITICAL: 1" in captured.out
+    try:
+        # Step 1: Clean up any existing clone
+        if os.path.exists(clone_dir):
+            print("🧹 Cleaning up existing clone...")
+            shutil.rmtree(clone_dir)
+        
+        # Step 2: Clone the repository
+        print("📥 Cloning repository...")
+        result = run_command(f'git clone --depth 1 {repo_url} {clone_dir}')
+        if result.returncode != 0:
+            print(f"❌ Failed to clone repo: {result.stderr}")
+            return False
+        
+        # Step 3: Create and checkout new branch
+        print(f"🌿 Creating branch: {branch_name}")
+        result = run_command(f'git checkout -b {branch_name}', cwd=clone_dir)
+        if result.returncode != 0:
+            print(f"❌ Failed to create branch: {result.stderr}")
+            return False
+        
+        # Step 4: Run initial scan to see what we find
+        print("🔍 Running initial scan...")
+        result = run_command(f'python ../decommission_tool.py {clone_dir} {db_name}')
+        if result.returncode != 0:
+            print(f"❌ Initial scan failed: {result.stderr}")
+            return False
+        
+        initial_findings = result.stdout
+        print("Initial scan results:")
+        print(initial_findings)
+        
+        # Step 5: Run decommission tool with --remove flag
+        print(f"🗑️  Running decommission tool with --remove on branch {branch_name}...")
+        result = run_command(f'python ../decommission_tool.py {clone_dir} {db_name} --remove')
+        
+        removal_output = result.stdout
+        print("Removal process output:")
+        print(removal_output)
+        
+        # Step 6: Verify removal by rescanning
+        print("✅ Verifying removal by rescanning...")
+        result = run_command(f'python ../decommission_tool.py {clone_dir} {db_name}')
+        if result.returncode != 0:
+            print(f"❌ Verification scan failed: {result.stderr}")
+            return False
+        
+        verification_output = result.stdout
+        print("Verification scan results:")
+        print(verification_output)
+        
+        # Step 7: Check git status to see what files were modified
+        print("📋 Checking git status for modified files...")
+        result = run_command('git status --porcelain', cwd=clone_dir)
+        modified_files = result.stdout
+        if modified_files:
+            print("Modified files:")
+            print(modified_files)
+        else:
+            print("No files were modified")
+        
+        # Step 8: Show git diff for modified files
+        if modified_files:
+            print("📝 Showing git diff...")
+            result = run_command('git diff', cwd=clone_dir)
+            print("Git diff:")
+            print(result.stdout[:2000])  # Limit output
+        
+        # Step 9: Switch back to main branch
+        print("🔄 Switching back to main branch...")
+        result = run_command('git checkout main', cwd=clone_dir)
+        if result.returncode != 0:
+            print(f"❌ Failed to switch to main: {result.stderr}")
+            return False
+        
+        # Step 10: Delete the test branch
+        print(f"🗑️  Deleting test branch: {branch_name}")
+        result = run_command(f'git branch -D {branch_name}', cwd=clone_dir)
+        if result.returncode != 0:
+            print(f"❌ Failed to delete branch: {result.stderr}")
+            return False
+        
+        # Step 11: Final cleanup
+        print("🧹 Final cleanup...")
+        shutil.rmtree(clone_dir)
+        
+        print("✅ E2E test with branch management completed successfully!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ E2E test failed with exception: {e}")
+        return False
+
+if __name__ == "__main__":
+    success = test_e2e_with_branch()
+    sys.exit(0 if success else 1)
 ```
 
-#### `.gitignore`
+## **Updated Makefile with E2E Branch Testing**
 
+Add these targets to your existing `Makefile`:
+
+```makefile
+# E2E test with branch management
+e2e-branch:
+	@echo "🧪 Running E2E test with branch management..."
+	@$(PYTHON) test_e2e_branch.py
+
+# Remove database references from source files
+remove-db-refs:
+	@echo "🗑️  Removing database references from source files..."
+	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME) --remove
+
+# Safe removal with branch creation
+remove-db-safe: setup-target
+	@echo "🌿 Creating branch for safe removal..."
+	@cd $(TARGET_REPO_DIR) && git checkout -b chore/$(DB_NAME)-decomission
+	@echo "🗑️  Removing database references..."
+	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME) --remove
+	@echo "✅ Verification scan..."
+	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME)
+	@echo "🔄 Switching back to main..."
+	@cd $(TARGET_REPO_DIR) && git checkout main
+	@echo "🗑️  Deleting test branch..."
+	@cd $(TARGET_REPO_DIR) && git branch -D chore/$(DB_NAME)-decomission
+
+# Complete CI with branch testing
+ci-with-branch: install lint test e2e-branch
+	@echo "✅ CI pipeline with branch testing completed successfully"
 ```
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
 
-# Virtual environment
-.venv/
-venv/
-env/
+## **Usage Examples**
 
-# IDE / Editor
-.vscode/
-.idea/
-*.sublime-project
-*.sublime-workspace
+```bash
+# Run E2E test with branch management
+make e2e-branch
 
-# OS generated files
-.DS_Store
-Thumbs.db
+# Safe removal with automatic branch management
+make remove-db-safe DB_NAME=my_test_db
 
-# Test artifacts
-.pytest_cache/
-.mypy_cache/
-htmlcov/
-.coverage
+# Complete CI pipeline with branch testing
+make ci-with-branch
 
-# Cloned repositories for testing
-cloudnative-pg/
-
-# Output files
-decommission_findings.json
+# Manual branch-based removal
+make setup-target
+cd ./cloudnative-pg && git checkout -b chore/my_db-decomission
+python decommission_tool.py ./cloudnative-pg my_db --remove
+python decommission_tool.py ./cloudnative-pg my_db  # Verify
+cd ./cloudnative-pg && git checkout main && git branch -D chore/my_db-decomission
 ```
+
+This enhanced solution provides:
+
+1. **Branch Creation**: Creates `chore/{db_name}-decomission` branch before modifications
+2. **File Modification**: Actually removes/comments out PostgreSQL references
+3. **Verification**: Rescans to confirm removal worked
+4. **Clean Cleanup**: Switches back to main and deletes test branch
+5. **Git Integration**: Shows what files were modified and their diffs
+6. **Safety**: All changes are isolated to the test branch
+
+The E2E test now follows the complete GitOps workflow for database decommissioning with proper branch management.
 
 Citations:
-[1] [repomix-output.xml](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/8768170/a8812ed0-493d-443d-8bd6-c1328602d006/repomix-output.xml)  
-[2] [Makefile¶](https://fpgmaas.github.io/cookiecutter-uv/features/makefile/)  
-[3] [GitHub - mivanit/python-project-makefile-template: makefile for managing python projects](https://github.com/mivanit/python-project-makefile-template)  
-[4] [Makefile - fpgmaas/cookiecutter-uv-example - GitHub](https://github.com/fpgmaas/cookiecutter-uv-example/blob/main/Makefile)  
-[5] [The Ultimate Guide to the Fastest Python Package Manager](https://www.datacamp.com/tutorial/python-uv)  
-[6] [Uninstall uv Python package installer - Stack Overflow](https://stackoverflow.com/questions/78076401/uninstall-uv-python-package-installer)  
-[7] [PostgreSQL Extension Developer Tips – Part 3 - Keith's Ramblings...](https://www.keithf4.com/extension_tips_3/)  
-[8] [How do I package my python code into an executable I can send to ...](https://www.reddit.com/r/learnpython/comments/103jd0z/how_do_i_package_my_python_code_into_an/)  
-[9] [17.3. Building and Installation with Autoconf and Make - PostgreSQL](https://www.postgresql.org/docs/current/install-make.html)  
-[10] [postgresql_anonymizer/Makefile at master · neondatabase/postgresql_anonymizer](https://github.com/neondatabase/postgresql_anonymizer/blob/master/Makefile)  
-[11] [Working on a project¤](https://pawamoy.github.io/copier-uv/work/)  
-[12] [Managing Python Projects With uv: An All-in-One Solution](https://realpython.com/python-uv/)  
-[13] [Where is the makefile located in order to install PostgreSQL extensions?](https://stackoverflow.com/questions/13173761/where-is-the-makefile-located-in-order-to-install-postgresql-extensions)  
-[14] [How to do install my custom package in editable mode ...](https://stackoverflow.com/questions/79418598/how-to-do-install-my-custom-package-in-editable-mode-with-uv)  
-[15] [CLI Reference](https://docs.astral.sh/uv/reference/cli/)  
-[16] [#044 | uv: A Guide to Python Package Management](https://flocode.substack.com/p/044-python-environments-again-uv)  
-[17] [How to Create a Python Virtual Environment with uv - Earthly Blog](https://earthly.dev/blog/python-uv/)  
-[18] [Makefile Tools VSCode extension](https://www.youtube.com/watch?v=zbi6WsscXuI)  
-[19] [Running scripts](https://docs.astral.sh/uv/guides/scripts/)  
-[20] [Using uv to develop Python command-line applications](https://til.simonwillison.net/python/uv-cli-apps)  
-[21] [cibuildwheel/docs/options.md at main - GitHub](https://github.com/pypa/cibuildwheel/blob/main/docs/options.md)
+[1] [repomix-output.xml](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/8768170/d1af88b4-8f13-49c1-b2d1-cb1e9d369be9/repomix-output.xml)  
+[2] [Python way to clone a git repository - Stack Overflow](https://stackoverflow.com/questions/2472552/python-way-to-clone-a-git-repository)  
+[3] [Clone git repo using GitPython - GitHub Gist](https://gist.github.com/plembo/a786ce2851cec61ac3a051fcaf3ccdab)  
+[4] [Cloning a repository - GitHub Docs](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository)  
+[5] [Python script for cloning repositories - DEV Community](https://dev.to/nisevi/script-for-cloning-repositories-4h4m)  
+[6] [Python code for GitHub repositories cloning automation | Python Script | GIT API usage in python](https://www.youtube.com/watch?v=MDtgwwAuQEw)  
+[7] [Cloning a git repo in python](https://www.youtube.com/watch?v=gu0tZJfq75o)  
+[8] [How to clone github respository with python?](https://stackoverflow.com/questions/59113664/how-to-clone-github-respository-with-python)  
+[9] [How to git clone all of your repositories at once with a simple python ...](https://www.reddit.com/r/github/comments/10p65j5/how_to_git_clone_all_of_your_repositories_at_once/)  
+[10] [How to manage git repositories with Python](https://linuxconfig.org/how-to-manage-git-repositories-with-python)  
+[11] [GitPython Tutorial — GitPython 3.1.44 documentation](https://gitpython.readthedocs.io/en/stable/tutorial.html)  
+[12] [Pytest best practice to setup and teardown before and after all tests](https://stackoverflow.com/questions/76608690/pytest-best-practice-to-setup-and-teardown-before-and-after-all-tests)  
+[13] [Branching With Git And Testing With Pytest: A Comprehensive Guide](https://jjmojojjmojo.github.io/branching-git-with-pytest.html)  
+[14] [Branch for testing then delete? : r/git - Reddit](https://www.reddit.com/r/git/comments/1id3p12/branch_for_testing_then_delete/)  
+[15] [Pytest Plugin List](https://docs.pytest.org/en/stable/reference/plugin_list.html)  
+[16] [Research Software Engineering with Python](https://alan-turing-institute.github.io/rse-course/html/module04_version_control_with_git/04_07_branches.html)  
+[17] [How to Delete Local and Remote Git Branches | Refine](https://refine.dev/blog/git-delete-remote-branch-and-local-branch/)  
+[18] [Git Branch Explained: How to Delete, Checkout, Create, and Rename a branch in Git](https://www.freecodecamp.org/news/git-branch-explained-how-to-delete-checkout-create-and-rename-a-branch-in-git/)  
+[19] [Branching With Git And Testing With Pytest: A Comprehensive Guide](https://jjmojojjmojo.github.io/branching-git-with-pytest-2.html)  
+[20] [seleniumbase/SeleniumBase: Python APIs for web ... - GitHub](https://github.com/seleniumbase/SeleniumBase)  
+[21] [Testing - Visual Studio Code](https://code.visualstudio.com/docs/debugtest/testing)

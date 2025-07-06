@@ -18,7 +18,8 @@ help:
 	@echo "  dev-setup    - Set up the full development environment"
 	@echo "  test         - Run unit tests"
 	@echo "  e2e          - Run e2e tests against cloudnative-pg"
-	@echo "  scan-db      - Scan target repo. Usage: make scan-db DB_NAME=mydb"
+	@echo "  test-e2e-branch - Run e2e test with branch creation and removal"
+	@echo "  scan-db      - Scan target repo. Usage: make scan-db DB_NAME=mydb [ARGS=--remove]"
 	@echo "  lint         - Run linting and type checking"
 	@echo "  format       - Format code"
 	@echo "  ci           - Run a full CI check (lint, test, e2e)"
@@ -57,13 +58,18 @@ test:
 # Run e2e tests
 e2e: setup-target
 	@echo "🔄 Running e2e scan against $(TARGET_REPO_DIR)..."
-	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME)
+	@$(PYTHON) test_e2e_branch.py
 	@echo "✅ E2E scan completed. Results are in decommission_findings.json"
 
 # Scan repository with a custom database name
 scan-db: setup-target
-	@echo "🔍 Scanning $(TARGET_REPO_DIR) for database: $(DB_NAME)"
-	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME)
+	@echo "🔍 Scanning $(TARGET_REPO_DIR) for database: $(DB_NAME) with args: $(ARGS)"
+	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME) $(ARGS)
+
+# Run E2E test with branch management
+test-e2e-branch:
+	@echo "🧪 Running E2E test with branch creation..."
+	@$(PYTHON) test_e2e_branch.py
 
 # Lint and type check code
 lint:

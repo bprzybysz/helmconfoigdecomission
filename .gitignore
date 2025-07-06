@@ -34,3 +34,4 @@ cloudnative-pg/
 
 # Output files
 decommission_findings.json
+repomix-output.xml
