@@ -10,6 +10,13 @@ DB_NAME ?= postgres
 VENV_DIR := .venv
 PYTHON := $(VENV_DIR)/bin/python
 
+# Container settings
+IMAGE_NAME ?= helm-decommission-tool
+IMAGE_TAG ?= latest
+# Detect container runtime (podman or docker)
+CONTAINER_RUNTIME := $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
+COMPOSE_CMD := $(if $(findstring podman,$(CONTAINER_RUNTIME)),podman-compose,docker-compose)
+
 # Default target
 help:
 	@echo "PostgreSQL Decommission Tool - UV Managed"
@@ -24,6 +31,13 @@ help:
 	@echo "  format           - Format code"
 	@echo "  ci               - Run a full CI check (lint, test, e2e)"
 	@echo "  clean            - Clean up generated files, cache, and cloned repo"
+	@echo ""
+	@echo "Container Commands:"
+	@echo "  container-build  - Build the container image"
+	@echo "  container-test   - Run tests inside the container"
+	@echo "  container-shell  - Get a shell inside the running container"
+	@echo "  container-clean  - Clean up containers and volumes"
+	@echo "  container-debug-persistence - Inspect persistence volume in the container"
 
 # Install dependencies using uv[2]
 install:
@@ -84,7 +98,7 @@ format:
 	@$(VENV_DIR)/bin/uv run ruff format .
 
 # Clean up generated files
-clean:
+clean: container-clean
 	@echo "🧹 Cleaning up..."
 	@rm -rf .pytest_cache .mypy_cache
 	@find . -type d -name "__pycache__" -exec rm -r {} + > /dev/null 2>&1 || true
@@ -102,6 +116,8 @@ ci:
 	make lint; \
 	make test; \
 	make e2e; \
+	make container-build; \
+	make container-test; \
 	echo "✅ CI pipeline completed successfully"
 
 # Clean up generated files and artifacts[4]
@@ -109,3 +125,29 @@ clean-venv:
 	@echo "🧹 Cleaning virtual environment..."
 	@rm -rf $(VENV_DIR)
 	@echo "✅ Virtual environment cleaned"
+
+# --- Container Commands ---
+
+container-build:
+	@if [ -z "$(CONTAINER_RUNTIME)" ]; then \
+		echo "❌ Neither podman nor docker found. Please install one."; \
+		exit 1; \
+	fi
+	@echo "🏗️ Building container image with $(CONTAINER_RUNTIME)..."
+	@$(CONTAINER_RUNTIME) build -t $(IMAGE_NAME):$(IMAGE_TAG) .
+
+container-test:
+	@echo "🧪 Running tests inside the container..."
+	@$(COMPOSE_CMD) run --rm app ./run_tests.sh
+
+container-shell:
+	@echo "🐚 Opening a shell in the container..."
+	@$(COMPOSE_CMD) run --rm app /bin/bash
+
+container-clean:
+	@echo "🧹 Cleaning up containers and volumes..."
+	@$(COMPOSE_CMD) down -v --remove-orphans
+
+container-debug-persistence:
+	@echo "🔍 Inspecting persistence volume..."
+	@$(COMPOSE_CMD) run --rm app sh -c "echo '--- Root directory ---' && ls -la / && echo '--- Persistence directory ---' && ls -la /persistence"

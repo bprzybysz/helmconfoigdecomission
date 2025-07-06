@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  mcp-server:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+    # Command to run the MCP server
+    command: python mcp_server_main.py

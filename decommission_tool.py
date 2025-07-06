@@ -5,7 +5,8 @@ import argparse
 import yaml
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
+import logging
 
 # Import the new GitRepository class
 from git_utils import GitRepository
@@ -83,6 +84,30 @@ class PostgreSQLDecommissionTool:
         self.findings['total_found'] = len(found_files)
         return self.findings
 
+    def _remove_from_yaml_structure(self, data: Any) -> Any:
+        """Recursively removes db_name from string values in YAML structures."""
+        if isinstance(data, dict):
+            new_data = {}
+            for k, v in data.items():
+                if k == self.db_name or k == 'postgresql':
+                    continue # Skip this key
+                new_data[k] = self._remove_from_yaml_structure(v)
+            return new_data
+        elif isinstance(data, list):
+            new_list = []
+            for elem in data:
+                if isinstance(elem, str) and (elem == self.db_name or elem == 'postgresql'):
+                    continue # Skip this element
+                new_list.append(self._remove_from_yaml_structure(elem))
+            return new_list
+        elif isinstance(data, str):
+            # Use regex to replace the db_name, ensuring it's a whole word or part of a URL/connection string
+            # This regex tries to match the db_name as a whole word or within common connection string patterns
+            # It's a balance between being too aggressive and missing cases.
+            pattern = re.compile(r'\b' + re.escape(self.db_name) + r'\b|' + re.escape(self.db_name) + r'(?=[/:@])')
+            return pattern.sub('', data)
+        return data
+
     def remove_references(self):
         """Remove found references from files."""
         if not self.remove:
@@ -90,15 +115,19 @@ class PostgreSQLDecommissionTool:
 
         for finding in self.findings.get('helm_dependencies', []):
             file_path = Path(finding['file'])
+            logging.debug(f"Processing Helm dependencies in {file_path}")
             try:
                 with file_path.open('r') as f:
                     chart = yaml.safe_load(f)
                 if 'dependencies' in chart:
                     chart['dependencies'] = [dep for dep in chart['dependencies'] if dep.get('name') != 'postgresql']
                     with file_path.open('w') as f:
-                        yaml.dump(chart, f)
+                        yaml.dump(chart, f, default_flow_style=False)
+                    logging.debug(f"Successfully removed 'postgresql' dependency from {file_path}")
+            except yaml.YAMLError as e:
+                logging.error(f"Error processing YAML file {file_path}: {e}")
             except Exception as e:
-                print(f"Error processing {file_path}: {e}", file=sys.stderr)
+                logging.error(f"An unexpected error occurred while processing {file_path}: {e}")
 
         for finding in self.findings.get('pvc_references', []):
             file_path = Path(finding['file'])
@@ -110,13 +139,26 @@ class PostgreSQLDecommissionTool:
         all_files_to_clean = set(f['file'] for f in self.findings.get('config_map_references', [])) | set(f['file'] for f in self.findings.get('source_code_references', []))
         for file_path_str in all_files_to_clean:
             file_path = Path(file_path_str)
+            logging.debug(f"Cleaning references in {file_path}")
             try:
-                lines = file_path.read_text(encoding='utf-8').splitlines()
-                new_lines = [line for line in lines if self.db_name not in line and 'postgresql' not in line.lower()]
-                if len(lines) != len(new_lines):
-                    file_path.write_text('\n'.join(new_lines) + '\n', encoding='utf-8')
+                if file_path.suffix in self.constraints['yaml_extensions']:
+                    with file_path.open('r') as f:
+                        data = yaml.safe_load(f)
+                    
+                    data = self._remove_from_yaml_structure(data)
+                    
+                    with file_path.open('w') as f:
+                        yaml.dump(data, f, default_flow_style=False)
+                else:
+                    lines = file_path.read_text(encoding='utf-8').splitlines()
+                    new_lines = [line for line in lines if self.db_name not in line and 'postgresql' not in line.lower()]
+                    if len(lines) != len(new_lines):
+                        file_path.write_text('\n'.join(new_lines) + '\n', encoding='utf-8')
+                        logging.debug(f"Successfully cleaned references from {file_path}")
+            except yaml.YAMLError as e:
+                logging.error(f"Error processing YAML file {file_path}: {e}")
             except Exception as e:
-                print(f"Error processing {file_path}: {e}", file=sys.stderr)
+                logging.error(f"An unexpected error occurred while processing {file_path}: {e}")
 
     def run(self):
         """Run the decommissioning tool."""

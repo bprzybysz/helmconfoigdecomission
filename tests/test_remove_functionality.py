@@ -1,5 +1,6 @@
 import pytest
 import tempfile
+import textwrap
 import yaml
 from pathlib import Path
 from decommission_tool import PostgreSQLDecommissionTool, generate_summary_and_plan
@@ -17,31 +18,31 @@ def temp_repo_with_postgres(tmp_path: Path) -> Path:
     src_dir.mkdir(parents=True)
 
     # Chart.yaml with PostgreSQL dependency
-    (charts_dir / "Chart.yaml").write_text("""
-apiVersion: v2
-name: my-app
-dependencies:
-  - name: postgresql
-    version: "12.1.6"
-    repository: "https://charts.bitnami.com/bitnami"
-  - name: redis
-    version: "17.3.7"
-    repository: "https://charts.bitnami.com/bitnami"
-""")
+    (charts_dir / "Chart.yaml").write_text(textwrap.dedent("""\
+        apiVersion: v2
+        name: my-app
+        dependencies:
+          - name: postgresql
+            version: "12.1.6"
+            repository: "https://charts.bitnami.com/bitnami"
+          - name: redis
+            version: "17.3.7"
+            repository: "https://charts.bitnami.com/bitnami"
+    """))
 
     # values.yaml with PostgreSQL config
-    (charts_dir / "values.yaml").write_text("""
-replicaCount: 1
-postgresql:
-  enabled: true
-  postgresqlDatabase: my_test_db
-  postgresqlUsername: testuser
-redis:
-  enabled: true
-database:
-  name: my_test_db
-  host: postgres-service
-""")
+    (charts_dir / "values.yaml").write_text(textwrap.dedent("""\
+        replicaCount: 1
+        postgresql:
+          enabled: true
+          postgresqlDatabase: my_test_db
+          postgresqlUsername: testuser
+        redis:
+          enabled: true
+        database:
+          name: my_test_db
+          host: postgres-service
+    """))
 
     # Source code with DB references
     (src_dir / "main.go").write_text("""
