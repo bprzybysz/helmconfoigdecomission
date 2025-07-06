@@ -37,7 +37,7 @@ class PostgreSQLDecommissionTool:
         found = []
         try:
             content = file_path.read_text(encoding='utf-8')
-            pattern = re.compile(f'\b{re.escape(self.db_name)}\b', re.IGNORECASE)
+            pattern = re.compile(re.escape(self.db_name), re.IGNORECASE)
             if pattern.search(content):
                 lines = content.splitlines()
                 matched_lines = [i + 1 for i, line in enumerate(lines) if pattern.search(line)]
@@ -160,7 +160,12 @@ class PostgreSQLDecommissionTool:
         for item in self.findings.get('config_references', []) + self.findings.get('source_code_references', []):
             file_path = self.repo_path / item['file']
             try:
-                lines = file_path.read_text(encoding='utf-8').splitlines()
+                content = file_path.read_text(encoding='utf-8')
+                
+                if file_path.name == 'values.yaml':
+                    content = re.sub(r'^\s*postgresql:.*?(?=\n\S|\Z)', '', content, flags=re.DOTALL | re.MULTILINE)
+
+                lines = content.splitlines()
                 new_lines = [line for line in lines if self.db_name not in line]
                 file_path.write_text('\n'.join(new_lines), encoding='utf-8')
             except IOError as e:
