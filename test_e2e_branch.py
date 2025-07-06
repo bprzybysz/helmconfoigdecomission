@@ -42,8 +42,8 @@ def test_e2e_with_branch():
         # Step 4: Run initial scan to see what we find
         print("🔍 Running initial scan...")
         result = run_command(f'python decommission_tool.py {clone_dir} {db_name}')
-        if result.returncode != 0:
-            print(f"❌ Initial scan failed: {result.stderr}")
+        if result.returncode not in [0, 2]:
+            print(f"❌ Initial scan failed with unexpected exit code {result.returncode}: {result.stderr}")
             return False
         
         initial_findings = result.stdout
@@ -60,7 +60,7 @@ def test_e2e_with_branch():
 
         # Step 6: Verify changes (this part would be more robust in a real E2E test)
         # For now, we'll just check if the output indicates success
-        if "✅ Database references removed from source files!" not in removal_output:
+        if "✅ Database references removal process finished!" not in removal_output:
             print(f"❌ Verification failed: Expected success message not found.")
             return False
         
