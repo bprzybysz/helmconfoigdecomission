@@ -115,16 +115,16 @@ class PostgreSQLDecommissionTool:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 docs = yaml.safe_load_all(f)
-            for doc in docs:
-                # Ensure doc is a dictionary before proceeding
-                if not isinstance(doc, dict) or doc.get('kind') != 'PersistentVolumeClaim':
-                    continue
-                    
-                name = doc.get('metadata', {}).get('name', '').lower()
-                labels = doc.get('metadata', {}).get('labels', {})
-                # Simple check if 'postgres' or db_name is in the PVC name or a common label
-                if 'postgres' in name or self.db_name in name or 'postgres' in str(labels):
-                    findings.append({'file': str(file_path.relative_to(self.repo_path)), 'type': 'pvc_reference', 'content': f"PVC found: {name}", 'severity': 'critical'})
+                for doc in docs:
+                    # Ensure doc is a dictionary before proceeding
+                    if not isinstance(doc, dict) or doc.get('kind') != 'PersistentVolumeClaim':
+                        continue
+                        
+                    name = doc.get('metadata', {}).get('name', '').lower()
+                    labels = doc.get('metadata', {}).get('labels', {})
+                    # Simple check if 'postgres' or db_name is in the PVC name or a common label
+                    if 'postgres' in name or self.db_name in name or 'postgres' in str(labels):
+                        findings.append({'file': str(file_path.relative_to(self.repo_path)), 'type': 'pvc_reference', 'content': f"PVC found: {name}", 'severity': 'critical'})
         except (yaml.YAMLError, IOError) as e:
             print(f"Warning: Could not process {file_path} for PVCs: {e}", file=sys.stderr)
         return findings
