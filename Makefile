@@ -1,9 +1,10 @@
 # Makefile for PostgreSQL Decommission Tool with Python 3.11+
 
 # Variables - Simplified Python detection
-PYTHON := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)
-PYTHON_VERSION := $(shell $(PYTHON) -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 VENV_DIR := .venv
+PYTHON_VERSION := 3.11
+PYTHON := $(VENV_DIR)/bin/python
+PYTHON_VERSION := $(shell $(PYTHON) -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 PIP := $(VENV_DIR)/bin/pip
 PYTEST := $(VENV_DIR)/bin/pytest
 
@@ -79,7 +80,7 @@ test-unit: $(VENV_DIR)/bin/activate
 
 test-integration: $(VENV_DIR)/bin/activate
 	@echo "🔍 Running integration tests..."
-	@$(PYTEST) tests/test_*integration*.py tests/test_*_mcp_*.py -v --asyncio-mode=auto
+	@$(PYTEST) tests/test_decommission_tool.py tests/test_remove_functionality.py tests/test_file_system_mcp_server.py -v --asyncio-mode=auto
 
 test-e2e: $(VENV_DIR)/bin/activate
 	@echo "🏁 Running E2E tests..."
