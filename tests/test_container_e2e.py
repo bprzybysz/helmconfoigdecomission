@@ -1,6 +1,9 @@
-# At the top of tests/test_container_e2e.py
+from pathlib import Path
 from .container_manager import AsyncContainerManager, AsyncE2ETestSuite
 import pytest
+
+# Path to the docker-compose.yml file
+COMPOSE_FILE = Path(__file__).parent.parent / "docker-compose.yml"
 
 # Replace the container_env fixture
 @pytest.fixture(scope="session")

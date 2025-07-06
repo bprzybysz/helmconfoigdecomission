@@ -1,7 +1,7 @@
 # Makefile for PostgreSQL Decommission Tool with Python 3.11+
 
-# Variables - FIXED: Dynamic Python detection
-PYTHON := $(shell command -v python3.11 2>/dev/null || command -v python3 2>/dev/null || command -v python 2>/dev/null)
+# Variables - Simplified Python detection
+PYTHON := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)
 PYTHON_VERSION := $(shell $(PYTHON) -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 VENV_DIR := .venv
 PIP := $(VENV_DIR)/bin/pip
