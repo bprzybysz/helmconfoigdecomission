@@ -1,5 +1,8 @@
 # Use an official Python runtime as a parent image
-FROM python:3.9-slim-buster
+FROM python:3.10-slim-buster
+
+# Define build argument for environment
+ARG ENV=dev
 
 # Set the working directory in the container
 WORKDIR /app
@@ -7,11 +10,17 @@ WORKDIR /app
 # Copy the current directory contents into the container at /app
 COPY . /app
 
+# Make the test_persistence.sh script executable
+RUN chmod +x /app/test_persistence.sh
+
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Make port 5000 available to the world outside this container
 EXPOSE 5000
 
-# Run mcp_server_main.py when the container launches
-CMD ["python", "mcp_server_main.py"]
+# Set the entrypoint to our custom shell script
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+# Default command to pass to the entrypoint (if no other command is given)
+CMD []
