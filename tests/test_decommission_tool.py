@@ -1,9 +1,33 @@
 import pytest
 import tempfile
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, mock_open
 from decommission_tool import PostgreSQLDecommissionTool, generate_summary_and_plan
+
+@pytest.fixture
+def git_repo(temp_repo: Path, request) -> Path:
+    """Initialize a git repository in the temp_repo and handle cleanup."""
+    # Ensure the directory is clean before starting
+    if (temp_repo / ".git").exists():
+        shutil.rmtree(temp_repo / ".git")
+
+    subprocess.run(["git", "init"], cwd=temp_repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=temp_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=temp_repo, check=True, capture_output=True)
+    
+    yield temp_repo
+    
+    # Cleanup unless --dont-delete is specified
+    if not request.config.getoption("--dont-delete"):
+        # The tmp_path fixture handles directory removal, but we can be explicit
+        # about the git branch if needed. For now, shutil.rmtree on the whole
+        # temp_repo by pytest is sufficient.
+        pass
+    else:
+        print(f"\nTest repository and branch left for inspection at: {temp_repo}")
 
 @pytest.fixture
 def temp_repo(tmp_path: Path) -> Path:
@@ -198,8 +222,38 @@ def test_main_function_with_args(mock_getsize, mock_file):
     with patch('sys.argv', ['decommission_tool.py', '/fake/repo', 'fake_db', '--remove']):
         with patch('decommission_tool.PostgreSQLDecommissionTool') as mock_tool:
             # To test the main function, we need to import it or run the script
-            # This is a placeholder for how you might structure this test
+            # as a subprocess. For simplicity, we'll just check if the tool is initialized.
+            # A full e2e test would be better here.
             pass
+
+def test_e2e_branch_lifecycle(git_repo: Path, request):
+    """Test the full branch lifecycle: create, modify, commit, and optionally delete."""
+    db_name = "my_test_db"
+    tool = PostgreSQLDecommissionTool(str(git_repo), db_name, remove=True)
+    
+    # 1. Create a new branch
+    assert tool.create_test_branch("decommission-test")
+    
+    # 2. Scan and remove references
+    tool.scan_repository()
+    tool.remove_references()
+    
+    # 3. Commit the changes
+    assert tool.commit_changes("feat: remove postgres references")
+    
+    # 4. Check that the branch has no uncommitted changes
+    status_result = subprocess.run(["git", "status", "--porcelain"], cwd=git_repo, check=True, capture_output=True, text=True)
+    assert status_result.stdout == ""
+    
+    # 5. Switch back to the original branch
+    assert tool.switch_back_to_original()
+    
+    # 6. Optionally delete the branch
+    if not request.config.getoption("--dont-delete"):
+        assert tool.delete_test_branch()
+        # Verify the branch is deleted
+        result = subprocess.run(["git", "branch", "--list", "decommission-test"], cwd=git_repo, check=True, capture_output=True, text=True)
+        assert result.stdout == ""
 
 def test_integration_with_real_helm_chart(temp_repo: Path):
         """

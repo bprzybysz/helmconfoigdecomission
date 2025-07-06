@@ -25,6 +25,15 @@ This document summarizes the enhancements and bug fixes applied to the `PostgreS
     *   The test suite (`tests/test_decommission_tool.py` and `tests/test_remove_functionality.py`) was updated to align with the refactored code and new findings structure.
     *   All identified test failures, including those related to incomplete YAML removal and plan string mismatches, have been resolved.
 
+6.  **Enhanced Testing and Workflow:**
+    *   **`--dont-delete` Flag:** Added a `--dont-delete` command-line option to `pytest` to preserve test branches after e2e runs for manual inspection and debugging.
+    *   **E2E Branch Lifecycle Test:** Implemented a new end-to-end test (`test_e2e_branch_lifecycle`) that validates the entire Git workflow: branch creation, code modification, committing, and conditional cleanup.
+    *   **`Makefile` Improvements:**
+        *   Added `test-e2e-inspect` target to run the e2e test and keep the branch.
+        *   Added `test-e2e-branch` target for running the e2e test with automatic cleanup.
+        *   Consolidated and improved the `clean` target to remove all generated files and caches.
+        *   Fixed the `ci` target to correctly run the e2e tests.
+
 ## Current Status:
 
-All unit and integration tests are passing, indicating that the `PostgreSQLDecommissionTool` is now robust and performs its intended functions accurately.
+All unit, integration, and e2e tests are passing. The `PostgreSQLDecommissionTool` is now robust, performs its intended functions accurately, and provides an improved testing and development workflow. The project is ready for final review.

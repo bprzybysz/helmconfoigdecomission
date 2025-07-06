@@ -1,7 +1,7 @@
 # Makefile for PostgreSQL Decommission Tool
 # UV-managed Python environment
 
-.PHONY: help install test scan clean lint format check e2e dev-setup ci clean-venv
+.PHONY: help install test scan clean lint format check e2e dev-setup ci clean-venv test-e2e-inspect
 
 # Variables
 TARGET_REPO_URL := https://github.com/cloudnative-pg/cloudnative-pg.git
@@ -14,16 +14,16 @@ PYTHON := $(VENV_DIR)/bin/python
 help:
 	@echo "PostgreSQL Decommission Tool - UV Managed"
 	@echo "Available commands:"
-	@echo "  install      - Install dependencies with UV"
-	@echo "  dev-setup    - Set up the full development environment"
-	@echo "  test         - Run unit tests"
-	@echo "  e2e          - Run e2e tests against cloudnative-pg"
-	@echo "  test-e2e-branch - Run e2e test with branch creation and removal"
-	@echo "  scan-db      - Scan target repo. Usage: make scan-db DB_NAME=mydb [ARGS=--remove]"
-	@echo "  lint         - Run linting and type checking"
-	@echo "  format       - Format code"
-	@echo "  ci           - Run a full CI check (lint, test, e2e)"
-	@echo "  clean        - Clean up generated files and cloned repo"
+	@echo "  install          - Install dependencies with UV"
+	@echo "  dev-setup        - Set up the full development environment"
+	@echo "  test             - Run all unit and integration tests"
+	@echo "  test-e2e-branch  - Run e2e test with branch creation and automatic cleanup"
+	@echo "  test-e2e-inspect - Run e2e test and leave branch for inspection"
+	@echo "  scan-db          - Scan target repo. Usage: make scan-db DB_NAME=mydb [ARGS=--remove]"
+	@echo "  lint             - Run linting and type checking"
+	@echo "  format           - Format code"
+	@echo "  ci               - Run a full CI check (lint, test, e2e)"
+	@echo "  clean            - Clean up generated files, cache, and cloned repo"
 
 # Install dependencies using uv[2]
 install:
@@ -50,45 +50,25 @@ dev-setup: install setup-target
 	@echo "🚀 Development environment ready"
 	@echo "Run 'make e2e' to test against the target repo"
 
-# Run unit tests
+# Run all tests
 test:
-	@echo "🧪 Running unit tests..."
+	@echo "🧪 Running all tests..."
 	@$(PYTHON) -m pytest tests/ -v --tb=short
 
-# Run all tests with coverage
-test-coverage:
-	@echo "🧪 Running tests with coverage..."
-	@$(PYTHON) -m pytest tests/ -v --cov=decommission_tool --cov-report=html --cov-report=term
+# Run E2E test with branch management and cleanup
+test-e2e-branch:
+	@echo "🧪 Running E2E test with branch creation and cleanup..."
+	@$(PYTHON) -m pytest tests/test_decommission_tool.py::test_e2e_branch_lifecycle -v
 
-# Run specific test categories
-test-unit:
-	@echo "🧪 Running unit tests..."
-	@$(PYTHON) -m pytest tests/test_decommission_tool.py -v
-
-test-integration:
-	@echo "🧪 Running integration tests..."
-	@$(PYTHON) -m pytest tests/test_integration.py -v
-
-# Run tests with detailed output
-test-verbose:
-	@echo "🧪 Running tests with verbose output..."
-	@$(PYTHON) -m pytest tests/ -v -s --tb=long
-
-# Run e2e tests
-e2e: setup-target
-	@echo "🔄 Running e2e scan against $(TARGET_REPO_DIR)..."
-	@$(PYTHON) test_e2e_branch.py
-	@echo "✅ E2E scan completed. Results are in decommission_findings.json"
+# Run e2e tests and leave the branch for inspection
+test-e2e-inspect:
+	@echo "🧪 Running E2E test and leaving branch for inspection..."
+	@$(PYTHON) -m pytest tests/test_decommission_tool.py::test_e2e_branch_lifecycle -v -s --dont-delete
 
 # Scan repository with a custom database name
 scan-db: setup-target
 	@echo "🔍 Scanning $(TARGET_REPO_DIR) for database: $(DB_NAME) with args: $(ARGS)"
 	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME) $(ARGS)
-
-# Run E2E test with branch management
-test-e2e-branch:
-	@echo "🧪 Running E2E test with branch creation..."
-	@$(PYTHON) test_e2e_branch.py
 
 # Lint and type check code
 lint:
@@ -102,6 +82,17 @@ format:
 	@echo "🎨 Formatting code..."
 	@$(VENV_DIR)/bin/uv run black .
 	@$(VENV_DIR)/bin/uv run ruff format .
+
+# Clean up generated files
+clean:
+	@echo "🧹 Cleaning up..."
+	@rm -rf .pytest_cache .mypy_cache
+	@find . -type d -name "__pycache__" -exec rm -r {} + > /dev/null 2>&1 || true
+	@rm -f decommission_findings.json
+	@rm -rf $(TARGET_REPO_DIR)
+
+# Run e2e tests
+e2e: test-e2e-branch
 
 # CI/CD pipeline simulation[5]
 ci:
@@ -118,10 +109,3 @@ clean-venv:
 	@echo "🧹 Cleaning virtual environment..."
 	@rm -rf $(VENV_DIR)
 	@echo "✅ Virtual environment cleaned"
-
-clean: clean-venv
-	@echo "🧹 Cleaning up..."
-	@rm -f decommission_findings.json
-	@rm -rf __pycache__/ .pytest_cache/ .mypy_cache/
-	@rm -rf $(TARGET_REPO_DIR)
-	@echo "✅ Cleanup completed"
