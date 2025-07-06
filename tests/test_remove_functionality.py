@@ -2,6 +2,7 @@ import pytest
 import tempfile
 import textwrap
 import yaml
+import json
 from pathlib import Path
 from decommission_tool import PostgreSQLDecommissionTool, generate_summary_and_plan
 
@@ -83,6 +84,15 @@ spec:
 
 def test_remove_postgres_references(temp_repo_with_postgres):
     """Test that PostgreSQL references are correctly removed from all files."""
+    # First, generate a summary and plan
+    result = generate_summary_and_plan(str(temp_repo_with_postgres), "my_test_db")
+    
+    # Verify the summary contains the expected information
+    assert result['summary']['database_name'] == 'my_test_db'
+    assert result['summary']['repository_path'] == str(temp_repo_with_postgres)
+    assert result['summary']['files_affected'] > 0
+    
+    # Now run the actual removal
     tool = PostgreSQLDecommissionTool(str(temp_repo_with_postgres), "my_test_db", remove=True)
     tool.run()
 
@@ -114,3 +124,32 @@ def test_remove_postgres_references(temp_repo_with_postgres):
     # Verify PVC is deleted
     pvc_path = temp_repo_with_postgres / "charts" / "templates" / "pvc.yaml"
     assert not pvc_path.exists()
+
+
+def test_generate_summary_and_plan(temp_repo_with_postgres):
+    """Test the generate_summary_and_plan function."""
+    # Generate the summary and plan
+    result = generate_summary_and_plan(str(temp_repo_with_postgres), "my_test_db")
+    
+    # Verify the structure of the result
+    assert 'summary' in result
+    assert 'plan' in result
+    assert 'recommendations' in result
+    
+    # Verify summary content
+    summary = result['summary']
+    assert summary['database_name'] == 'my_test_db'
+    assert summary['repository_path'] == str(temp_repo_with_postgres)
+    assert isinstance(summary['files_affected'], int)
+    assert isinstance(summary['total_references'], int)
+    assert isinstance(summary['files'], list)
+    
+    # Verify plan content
+    plan = result['plan']
+    assert isinstance(plan['steps'], list)
+    assert len(plan['steps']) > 0
+    assert 'rollback_instructions' in plan
+    
+    # Verify recommendations
+    assert isinstance(result['recommendations'], list)
+    assert len(result['recommendations']) > 0

@@ -1,15 +1,21 @@
 version: '3.8'
-
 services:
   mcp-server:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "5001:5000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+    volumes:
+      # Mount the host repo to a specific path inside the container
+      - ./tests/test_repo:/app/test_repo:ro
     environment:
       - MCP_LOG_LEVEL=DEBUG
-    # Command to run the MCP server
+      # Pass the host path to the container for the file system server
+      - MCP_HOST_REPO_PATH=/app/test_repo
+    healthcheck:
+      # This command checks if the server is ready to accept connections
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 15

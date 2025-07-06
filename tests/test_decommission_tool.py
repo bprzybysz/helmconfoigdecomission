@@ -10,7 +10,7 @@ from unittest.mock import patch, mock_open
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from decommission_tool import PostgreSQLDecommissionTool, generate_summary_and_plan, main
+from decommission_tool import PostgreSQLDecommissionTool, HelmDecommissionTool, main
 from git_utils import GitRepository
 
 @pytest.fixture
@@ -61,109 +61,203 @@ spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: 8Gi
+      storage: 1Gi
 """)
-    (config_dir / "my-config.yaml").write_text("""
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: my-app-config
-data:
-  DATABASE_URL: "postgres://user:pass@my-test-db:5432/mydb"
+    (charts_dir / "values.yaml").write_text("""
+replicaCount: 1
+image:
+  repository: nginx
+  tag: stable
+service:
+  type: ClusterIP
+  port: 80
+postgres:
+  enabled: true
+  databaseName: my-test-db
+  username: admin
 """)
-    (src_dir / "main.py").write_text("""
-import os
-def get_db_url():
-    return os.environ.get("DATABASE_URL", "postgres://default:default@my-test-db:5432/default")
-print(get_db_url())
+    (config_dir / "database.yml").write_text("""
+development:
+  adapter: postgresql
+  encoding: unicode
+  database: my-test-db
+  pool: 5
+  username: admin
+  password: password
 """)
-    (repo_dir / "README.md").write_text("This is a test repo.")
-    
+    (src_dir / "main.go").write_text("""
+package main
+
+import (
+	"fmt"
+)
+
+func main() {
+	fmt.Println("Connecting to database: my-test-db")
+}
+""")
+    (repo_dir / "README.md").write_text("""
+# My Test Repo
+
+This repository contains references to `my-test-db`.
+""")
     return repo_dir
 
-def test_tool_initialization(temp_repo: Path):
-    tool = PostgreSQLDecommissionTool(str(temp_repo), "test_db")
-    assert tool.repo_path == temp_repo
-    assert tool.db_name == "test_db"
-    assert tool.remove is False
+@pytest.fixture
+def repo_with_references(git_repo: Path) -> Path:
+    """Fixture that provides a git repository with pre-defined references to 'my-test-db'."""
+    return git_repo
 
-def test_is_excluded(temp_repo: Path):
-    tool = PostgreSQLDecommissionTool(str(temp_repo), "test_db")
-    assert tool._is_excluded(temp_repo / ".git" / "config") is True
-    assert tool._is_excluded(temp_repo / "node_modules" / "some-lib") is True
-    assert tool._is_excluded(temp_repo / "src" / "main.py") is False
+class TestPostgreSQLDecommissionTool:
+    def test_scan_file(self, temp_repo):
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my-test-db")
+        file_path = temp_repo / "config" / "database.yml"
+        findings = tool.scan_file(file_path)
+        assert len(findings) == 1
+        assert findings[0][0] == 4 # Line number
+        assert "database: my-test-db" in findings[0][1]
 
-def test_scan_repository(git_repo: Path):
-    db_name = "my-test-db"
-    tool = PostgreSQLDecommissionTool(str(git_repo), db_name)
-    findings = tool.scan_repository()
-    assert findings['total_scanned'] > 0
-    assert findings['total_found'] > 0
-    assert len(findings['helm_dependencies']) == 1
-    assert len(findings['pvc_references']) == 1
-    assert len(findings['config_map_references']) == 1
-    assert len(findings['source_code_references']) == 1
+    def test_scan_repository(self, repo_with_references):
+        tool = PostgreSQLDecommissionTool(str(repo_with_references), "my-test-db")
+        tool.scan_repository()
+        assert len(tool.findings) == 4 # database.yml, main.go, values.yaml, README.md
+        assert "config/database.yml" in tool.findings
+        assert "src/main.go" in tool.findings
+        assert "charts/values.yaml" in tool.findings
+        assert "README.md" in tool.findings
 
-def test_remove_references(git_repo: Path):
-    db_name = "my-test-db"
-    tool = PostgreSQLDecommissionTool(str(git_repo), db_name, remove=True)
-    tool.scan_repository()
-    tool.remove_references()
-    chart_content = (git_repo / "charts" / "Chart.yaml").read_text()
-    assert "postgresql" not in chart_content
-    assert not (git_repo / "templates" / "my-pvc.yaml").exists()
-    config_content = (git_repo / "config" / "my-config.yaml").read_text()
-    assert db_name not in config_content
-    source_content = (git_repo / "src" / "main.py").read_text()
-    assert db_name not in source_content
+    def test_remove_references_dry_run(self, repo_with_references):
+        tool = PostgreSQLDecommissionTool(str(repo_with_references), "my-test-db", remove=True, dry_run=True)
+        tool.run()
+        # Verify files still contain references in dry run
+        assert "my-test-db" in (repo_with_references / "config" / "database.yml").read_text()
 
-def test_generate_summary_and_plan():
-    findings = {
-        'helm_dependencies': [{'file': 'charts/Chart.yaml'}],
-        'pvc_references': [{'file': 'templates/pvc.yaml'}],
-        'config_map_references': [],
-        'source_code_references': [{'file': 'src/main.py'}],
-    }
-    summary, plan = generate_summary_and_plan(findings, "test_db", False)
-    assert "Helm Dependencies: 1 found" in summary
-    assert "PVC References: 1 found" in summary
-    assert "Source Code References: 1 found" in summary
-    assert "1. Remove Helm Dependency" in plan
+    def test_remove_references_actual(self, repo_with_references):
+        tool = PostgreSQLDecommissionTool(str(repo_with_references), "my-test-db", remove=True, dry_run=False)
+        tool.run()
+        # Verify files no longer contain references
+        assert "my-test-db" not in (repo_with_references / "config" / "database.yml").read_text()
+        assert "my-test-db" not in (repo_with_references / "src" / "main.go").read_text()
+        assert "my-test-db" not in (repo_with_references / "charts" / "values.yaml").read_text()
+        assert "my-test-db" not in (repo_with_references / "README.md").read_text()
 
-def test_e2e_branch_lifecycle(git_repo: Path, request):
-    db_name = "my_test_db"
-    git_util = GitRepository(str(git_repo))
-    tool = PostgreSQLDecommissionTool(str(git_repo), db_name, remove=True)
+    def test_generate_report(self, repo_with_references):
+        tool = PostgreSQLDecommissionTool(str(repo_with_references), "my-test-db")
+        tool.scan_repository()
+        report = tool.generate_report()
+        assert report["database_name"] == "my-test-db"
+        assert report["dry_run"] == False
+        assert report["remove_mode"] == False
+        assert "config/database.yml" in report["findings"]
 
-    assert git_util.create_test_branch("decommission-test")
-    tool.run()
-    diff = git_util.show_diff()
-    assert "postgresql" in diff
-    assert git_util.commit_changes("feat: remove db references")
-    original_branch = git_util.original_branch
-    assert git_util.revert_to_original_branch()
-    assert git_util.get_current_branch() == original_branch
-    if not request.config.getoption("--dont-delete"):
-        assert git_util.delete_test_branch()
-        result = subprocess.run(["git", "branch", "--list", git_util.test_branch], cwd=git_repo, capture_output=True, text=True)
-        assert git_util.test_branch not in result.stdout
+class TestHelmDecommissionTool:
+    def test_scan_helm_charts(self, repo_with_references):
+        tool = HelmDecommissionTool(str(repo_with_references), "my-test-db", "my-release")
+        tool.scan_helm_charts()
+        assert "my-app" in tool.helm_findings
+        assert "charts/values.yaml" in tool.helm_findings["my-app"]
+        assert "charts/templates/my-pvc.yaml" in tool.helm_findings["my-app"]
 
-def test_commit_changes_logic(git_repo: Path):
-    git_util = GitRepository(str(git_repo))
-    assert git_util.create_test_branch("commit-logic-test")
-    assert git_util.commit_changes("no changes commit") is True
-    log_result_before = subprocess.run(["git", "log", "--oneline"], cwd=git_repo, check=True, capture_output=True, text=True)
-    (git_repo / "new_file.txt").write_text("some changes")
-    assert git_util.commit_changes("feat: add new file") is True
-    log_result_after = subprocess.run(["git", "log", "--oneline"], cwd=git_repo, check=True, capture_output=True, text=True)
-    assert len(log_result_after.stdout.splitlines()) > len(log_result_before.stdout.splitlines())
-    assert "feat: add new file" in log_result_after.stdout
+    def test_generate_helm_commands(self, repo_with_references):
+        tool = HelmDecommissionTool(str(repo_with_references), "my-test-db", "my-release")
+        tool.scan_helm_charts()
+        commands = tool.generate_helm_commands()
+        assert len(commands) == 2
+        assert "helm uninstall my-release --namespace my-app" in commands
+        assert "helm delete my-release --purge" in commands
 
-def test_main_invalid_repo_path(capsys):
-    invalid_path = "/path/to/nonexistent/repo"
-    with patch('sys.argv', ['decommission_tool.py', invalid_path, 'test_db']), pytest.raises(SystemExit) as e:
-        main()
-    assert e.type == SystemExit
-    assert e.value.code == 1
-    captured = capsys.readouterr()
-    assert f"Error: The provided repository path '{invalid_path}' does not exist or is not a directory." in captured.err
+    def test_helm_tool_run(self, repo_with_references):
+        tool = HelmDecommissionTool(str(repo_with_references), "my-test-db", "my-release", remove=True, dry_run=False)
+        report = tool.run()
+        assert report["database_name"] == "my-test-db"
+        assert report["helm_release_name"] == "my-release"
+        assert "my-app" in report["helm_chart_findings"]
+        assert "helm uninstall my-release --namespace my-app" in report["helm_decommission_commands"]
+        # Verify files no longer contain references after Helm tool run
+        assert "my-test-db" not in (repo_with_references / "config" / "database.yml").read_text()
+        assert "my-test-db" not in (repo_with_references / "src" / "main.go").read_text()
+        assert "my-test-db" not in (repo_with_references / "charts" / "values.yaml").read_text()
+        assert "my-test-db" not in (repo_with_references / "README.md").read_text()
+
+class TestMainFunction:
+    def test_main_no_remove_no_dry_run(self, repo_with_references, capsys):
+        db_name = "my-test-db"
+        git_repo = str(repo_with_references)
+        with patch('sys.argv', ['decommission_tool.py', git_repo, db_name]):
+            main()
+        captured = capsys.readouterr()
+        assert "No changes were made to files." in captured.out
+        assert "my-test-db" in (Path(git_repo) / "config" / "database.yml").read_text()
+
+    def test_main_remove_with_dry_run(self, repo_with_references, capsys):
+        db_name = "my-test-db"
+        git_repo = str(repo_with_references)
+        with patch('sys.argv', ['decommission_tool.py', git_repo, db_name, '--remove', '--dry-run']):
+            main()
+        captured = capsys.readouterr()
+        assert "This was a dry run. No changes were made to files." in captured.out
+        assert "my-test-db" in (Path(git_repo) / "config" / "database.yml").read_text()
+
+    def test_main_remove_actual_confirmed(self, repo_with_references, capsys):
+        db_name = "my-test-db"
+        git_repo = str(repo_with_references)
+        with (
+            patch('sys.argv', ['decommission_tool.py', git_repo, db_name, '--remove']),
+            patch('builtins.input', return_value='yes')
+        ):
+            main()
+        captured = capsys.readouterr()
+        assert "References have been removed from files" in captured.out
+        assert "my-test-db" not in (Path(git_repo) / "config" / "database.yml").read_text()
+
+    def test_main_remove_actual_cancelled(self, repo_with_references, capsys):
+        db_name = "my-test-db"
+        git_repo = str(repo_with_references)
+        original_content = (Path(git_repo) / "config" / "database.yml").read_text()
+        with (
+            patch('sys.argv', ['decommission_tool.py', git_repo, db_name, '--remove']),
+            patch('builtins.input', return_value='no')
+        ):
+            main()
+        captured = capsys.readouterr()
+        assert "Operation cancelled by user." in captured.err
+        assert (Path(git_repo) / "config" / "database.yml").read_text() == original_content
+
+    def test_main_helm_decommission(self, repo_with_references, capsys):
+        db_name = "my-test-db"
+        release_name = "my-release"
+        git_repo = str(repo_with_references)
+        with patch('sys.argv', ['decommission_tool.py', git_repo, db_name, '--release-name', release_name, '--remove', '--dry-run']):
+            main()
+        captured = capsys.readouterr()
+        assert "Suggested Helm Decommissioning Commands:" in captured.out
+        assert "helm uninstall my-release --namespace my-app" in captured.out
+        assert "helm delete my-release --purge" in captured.out
+        assert "This was a dry run. No changes were made to files." in captured.out
+        assert "my-test-db" in (Path(git_repo) / "config" / "database.yml").read_text()
+
+    def test_main_invalid_repo_path(self, capsys):
+        invalid_path = "/path/to/nonexistent/repo"
+        with patch('sys.argv', ['decommission_tool.py', invalid_path, 'test_db']):
+            # main() calls sys.exit(1) on invalid path, so we catch SystemExit
+            with pytest.raises(SystemExit) as pytest_wrapped_e:
+                main()
+            assert pytest_wrapped_e.type == SystemExit
+            assert pytest_wrapped_e.value.code == 1
+        captured = capsys.readouterr()
+        assert f"Error: The provided repository path '{invalid_path}' does not exist or is not a directory." in captured.err
+
+    def test_dry_run_does_not_modify_files(self, repo_with_references, capsys):
+        db_name = "my-test-db"
+        git_repo = str(repo_with_references)
+        original_content = (Path(git_repo) / "charts/values.yaml").read_text()
+
+        with patch('sys.argv', ['decommission_tool.py', git_repo, db_name, '--remove', '--dry-run']):
+            main()
+        
+        # Verify the file content is unchanged
+        assert (Path(git_repo) / "charts/values.yaml").read_text() == original_content
+
+        # Verify no new branch was created
+        result = subprocess.run(["git", "branch"], cwd=git_repo, capture_output=True, text=True)
+        assert f"chore/{db_name}-decommission" not in result.stdout

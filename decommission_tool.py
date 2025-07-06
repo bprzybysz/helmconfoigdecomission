@@ -1,99 +1,13 @@
-import os
 import re
 import sys
 import argparse
 import logging
+from pathlib import Path
+from typing import List, Dict, Tuple, Any
+import yaml
+from git_utils import GitRepository
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Find and remove PostgreSQL database references in a repository.")
-    parser.add_argument("repo_path", help="Path to the git repository.")
-    parser.add_argument("db_name", help="Name of the PostgreSQL database to decommission.")
-    parser.add_argument("--remove", action="store_true", help="If set, actually remove references and commit changes.")
-    parser.add_argument("--branch-name", help="Name of the branch to create for removal changes. Defaults to chore/<db_name>-decommission.")
-    parser.add_argument("--dry-run", action="store_true", help="Perform a dry run without modifying files or creating branches/commits.")
-    args = parser.parse_args()
-
-    if args.remove and args.dry_run:
-        print("Error: Cannot use --remove and --dry-run together.", file=sys.stderr)
-        sys.exit(1)
-
-    repo_path = Path(args.repo_path)
-    if not repo_path.is_dir():
-        print(f"Error: Repository path '{args.repo_path}' is not a valid directory.", file=sys.stderr)
-        sys.exit(1)
-
-    git_repo = None
-    if args.remove or args.dry_run:
-        try:
-            git_repo = GitRepository(str(repo_path))
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    tool = PostgreSQLDecommissionTool(str(repo_path), args.db_name, args.remove and not args.dry_run)
-    
-    original_branch = None
-    test_branch_name = None
-
-    if git_repo:
-        original_branch = git_repo.get_current_branch()
-        if not original_branch:
-            logging.error("Not a git repository or no branch checked out. Cannot perform Git operations.")
-            sys.exit(1)
-        test_branch_name = args.branch_name if args.branch_name else f"chore/{args.db_name}-decommission"
-
-    try:
-        if args.remove and git_repo:
-            if not git_repo.create_test_branch(test_branch_name):
-                logging.error("Failed to create test branch. Aborting.")
-                sys.exit(1)
-        elif args.dry_run:
-            logging.info("Performing dry run. No files will be modified, and no branches/commits will be created.")
-
-        tool.run()
-
-        summary, plan = tool.generate_summary_and_plan()
-        print("\n📝 Summary of Findings:")
-        print(summary)
-        print("\n📝 Decommissioning Plan:")
-        print(plan)
-
-        if args.remove and git_repo:
-            logging.info("\n💾 Committing changes...")
-            commit_message = f"feat: Decommission PostgreSQL DB '{tool.db_name}'"
-            if git_repo.commit_changes(commit_message):
-                logging.info("✅ Changes committed successfully")
-            else:
-                logging.error("❌ Failed to commit changes")
-
-            logging.info("\n✅ Database references removal process finished!")
-            logging.info(f"🌿 Changes are in branch: {git_repo.test_branch}")
-            if original_branch:
-                logging.info(f"💡 To revert, run: git checkout {original_branch} && git branch -D {git_repo.test_branch}")
-        elif args.dry_run:
-            logging.info("\nDry run complete. No changes were applied.")
-    
-    except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-        if (args.remove or args.dry_run) and git_repo and original_branch:
-            git_repo.revert_to_original_branch()
-            logging.info(f"🔄 Reverted to original branch: {original_branch}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
-import yaml
-import subprocess
-from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any
-import logging
-
-# Import the new GitRepository class
-from git_utils import GitRepository
 
 class PostgreSQLDecommissionTool:
     """
@@ -101,10 +15,12 @@ class PostgreSQLDecommissionTool:
     This class is responsible for the core logic of scanning files and removing references.
     Git operations are handled separately.
     """
-    def __init__(self, repo_path: str, db_name: str, remove: bool = False):
+
+    def __init__(self, repo_path: str, db_name: str, remove: bool = False, dry_run: bool = False):
         self.repo_path = Path(repo_path)
         self.db_name = db_name
         self.remove = remove
+        self.dry_run = dry_run
         self.findings: Dict = {}
         self.constraints = {
             'yaml_extensions': ['.yaml', '.yml'],
@@ -116,253 +32,319 @@ class PostgreSQLDecommissionTool:
         """Check if a file or directory should be excluded from scan."""
         return any(part in self.constraints['exclude_dirs'] for part in path.parts)
 
-    def scan_repository(self) -> Dict:
-        """Scan the repository to find all references to the database."""
-        self.findings = {
-            'helm_dependencies': [],
-            'pvc_references': [],
-            'config_map_references': [],
-            'source_code_references': [],
-            'total_scanned': 0,
-            'total_found': 0
-        }
-        found_files = set()
+    def scan_file(self, file_path: Path) -> List[Tuple[int, str]]:
+        """
+        Scans a single file for references to the database name.
+        Returns a list of (line_number, line_content) where the database name was found.
+        """
+        found_lines = []
+        try:
+            content = file_path.read_text(encoding='utf-8')
+            for i, line in enumerate(content.splitlines()):
+                if re.search(r'\b' + re.escape(self.db_name) + r'\b', line):
+                    found_lines.append((i + 1, line.strip()))
+        except Exception as e:
+            logging.warning(f"Could not read file {file_path}: {e}")
+        return found_lines
 
+    def scan_repository(self) -> None:
+        """
+        Scans the entire repository for references to the database name.
+        Populates self.findings with file paths and their matching lines.
+        """
+        logging.info(f"Scanning repository {self.repo_path} for references to '{self.db_name}'...")
         for file_path in self.repo_path.rglob('*'):
             if file_path.is_file() and not self._is_excluded(file_path):
-                self.findings['total_scanned'] += 1
-                try:
-                    content = file_path.read_text(encoding='utf-8')
-                    added_to_findings = False
+                if file_path.suffix in self.constraints['yaml_extensions'] or \
+                   file_path.suffix in self.constraints['source_extensions']:
+                    found_lines = self.scan_file(file_path)
+                    if found_lines:
+                        self.findings[str(file_path.relative_to(self.repo_path))] = found_lines
+        logging.info("Scan complete.")
 
-                    if file_path.name == 'Chart.yaml':
-                        try:
-                            chart_content = yaml.safe_load(content)
-                            for dep in chart_content.get('dependencies', []):
-                                if dep.get('name') == 'postgresql':
-                                    self.findings['helm_dependencies'].append({'file': str(file_path), 'dependency': dep})
-                                    added_to_findings = True
-                        except yaml.YAMLError:
-                            pass # Ignore if not a valid YAML
-                    
-                    if 'pvc' in file_path.name.lower() and file_path.suffix in self.constraints['yaml_extensions']:
-                        if 'postgres' in content.lower():
-                            self.findings['pvc_references'].append({'file': str(file_path)})
-                            added_to_findings = True
-                    
-                    if file_path.suffix in self.constraints['yaml_extensions'] and not added_to_findings:
-                        if self.db_name in content or 'postgresql' in content.lower():
-                            self.findings['config_map_references'].append({'file': str(file_path)})
-                            added_to_findings = True
-                    
-                    if file_path.suffix in self.constraints['source_extensions'] and not added_to_findings:
-                        if self.db_name in content or 'postgresql' in content.lower():
-                            self.findings['source_code_references'].append({'file': str(file_path)})
-                            added_to_findings = True
-                    
-                    if added_to_findings:
-                        found_files.add(str(file_path))
-                except (UnicodeDecodeError, OSError) as e:
-                    print(f"Could not read file {file_path}: {e}", file=sys.stderr)
+    def _remove_from_file(self, file_path: Path) -> None:
+        """
+        Removes references to the database name from a single file.
+        This is a destructive operation and should only be called if self.remove is True.
+        """
+        original_content = file_path.read_text(encoding='utf-8')
+        new_content = re.sub(r'\b' + re.escape(self.db_name) + r'\b', '', original_content)
+        if original_content != new_content:
+            if not self.dry_run:
+                file_path.write_text(new_content, encoding='utf-8')
+                logging.info(f"Removed references from {file_path.relative_to(self.repo_path)}")
+            else:
+                logging.info(f"Dry run: Would remove references from {file_path.relative_to(self.repo_path)}")
 
-        self.findings['total_found'] = len(found_files)
-        return self.findings
-
-    def _remove_from_yaml_structure(self, data: Any) -> Any:
-        """Recursively removes db_name from string values in YAML structures."""
-        if isinstance(data, dict):
-            new_data = {}
-            for k, v in data.items():
-                if k == self.db_name or k == 'postgresql':
-                    continue # Skip this key
-                new_data[k] = self._remove_from_yaml_structure(v)
-            return new_data
-        elif isinstance(data, list):
-            new_list = []
-            for elem in data:
-                if isinstance(elem, str) and (elem == self.db_name or elem == 'postgresql'):
-                    continue # Skip this element
-                new_list.append(self._remove_from_yaml_structure(elem))
-            return new_list
-        elif isinstance(data, str):
-            # Use regex to replace the db_name, ensuring it's a whole word or part of a URL/connection string
-            # This regex tries to match the db_name as a whole word or within common connection string patterns
-            # It's a balance between being too aggressive and missing cases.
-            pattern = re.compile(r'\b' + re.escape(self.db_name) + r'\b|' + re.escape(self.db_name) + r'(?=[/:@])')
-            return pattern.sub('', data)
-        return data
-
-    def remove_references(self):
-        """Remove found references from files."""
+    def remove_references(self) -> None:
+        """
+        Removes all found references from the files if self.remove is True.
+        """
         if not self.remove:
+            logging.info("Remove flag is not set. Skipping reference removal.")
             return
 
-        for finding in self.findings.get('helm_dependencies', []):
-            file_path = Path(finding['file'])
-            logging.debug(f"Processing Helm dependencies in {file_path}")
-            try:
-                with file_path.open('r') as f:
-                    chart = yaml.safe_load(f)
-                if 'dependencies' in chart:
-                    chart['dependencies'] = [dep for dep in chart['dependencies'] if dep.get('name') != 'postgresql']
-                    with file_path.open('w') as f:
-                        yaml.dump(chart, f, default_flow_style=False)
-                    logging.debug(f"Successfully removed 'postgresql' dependency from {file_path}")
-            except yaml.YAMLError as e:
-                logging.error(f"Error processing YAML file {file_path}: {e}")
-            except Exception as e:
-                logging.error(f"An unexpected error occurred while processing {file_path}: {e}")
+        if not self.findings:
+            logging.info("No references found to remove.")
+            return
 
-        for finding in self.findings.get('pvc_references', []):
-            file_path = Path(finding['file'])
-            try:
-                os.remove(file_path)
-            except OSError as e:
-                print(f"Error deleting {file_path}: {e}", file=sys.stderr)
+        logging.info(f"Removing references to '{self.db_name}' from files...")
+        for file_path_str in self.findings:
+            full_path = self.repo_path / file_path_str
+            if full_path.exists() and full_path.is_file():
+                self._remove_from_file(full_path)
+        logging.info("Reference removal complete.")
 
-        all_files_to_clean = set(f['file'] for f in self.findings.get('config_map_references', [])) | set(f['file'] for f in self.findings.get('source_code_references', []))
-        for file_path_str in all_files_to_clean:
-            file_path = Path(file_path_str)
-            logging.debug(f"Cleaning references in {file_path}")
-            try:
-                if file_path.suffix in self.constraints['yaml_extensions']:
-                    with file_path.open('r') as f:
-                        data = yaml.safe_load(f)
-                    
-                    data = self._remove_from_yaml_structure(data)
-                    
-                    with file_path.open('w') as f:
-                        yaml.dump(data, f, default_flow_style=False)
-                else:
-                    lines = file_path.read_text(encoding='utf-8').splitlines()
-                    new_lines = [line for line in lines if self.db_name not in line and 'postgresql' not in line.lower()]
-                    if len(lines) != len(new_lines):
-                        file_path.write_text('\n'.join(new_lines) + '\n', encoding='utf-8')
-                        logging.debug(f"Successfully cleaned references from {file_path}")
-            except yaml.YAMLError as e:
-                logging.error(f"Error processing YAML file {file_path}: {e}")
-            except Exception as e:
-                logging.error(f"An unexpected error occurred while processing {file_path}: {e}")
+    def generate_report(self) -> Dict:
+        """
+        Generates a report of findings.
+        """
+        report = {
+            "database_name": self.db_name,
+            "repository_path": str(self.repo_path),
+            "dry_run": self.dry_run,
+            "remove_mode": self.remove,
+            "findings": self.findings
+        }
+        return report
 
-    def run(self):
-        """Run the decommissioning tool."""
+    def run(self) -> Dict:
+        """
+        Executes the tool's main logic: scan and optionally remove.
+        """
         self.scan_repository()
-        if self.remove:
-            self.remove_references()
+        self.remove_references()
+        return self.generate_report()
 
-def generate_summary_and_plan(findings: Dict, db_name: str, remove: bool) -> Tuple[str, str]:
-    summary_lines = [
-        f"Decommissioning Plan for PostgreSQL Database: {db_name}",
-        ""
-    ]
+class HelmDecommissionTool(PostgreSQLDecommissionTool):
+    """
+    Extends PostgreSQLDecommissionTool to specifically handle Helm chart decommissioning.
+    This includes identifying Helm releases and generating Helm-specific commands.
+    """
+    def __init__(self, repo_path: str, db_name: str, release_name: str, remove: bool = False, dry_run: bool = False):
+        super().__init__(repo_path, db_name, remove, dry_run)
+        self.release_name = release_name
+        self.helm_findings: Dict = {}
 
-    plan_lines = ["Decommissioning Plan:"]
-    
-    helm_deps_count = len(findings.get('helm_dependencies', []))
-    pvc_refs_count = len(findings.get('pvc_references', []))
-    config_map_refs_count = len(findings.get('config_map_references', []))
-    source_code_refs_count = len(findings.get('source_code_references', []))
+    def scan_helm_charts(self) -> None:
+        """
+        Scans Helm chart files (values.yaml, templates/*.yaml) for database references.
+        """
+        logging.info(f"Scanning Helm charts for release '{self.release_name}' and DB '{self.db_name}'...")
+        helm_chart_paths = []
+        for path in self.repo_path.rglob('Chart.yaml'):
+            chart_dir = path.parent
+            if not self._is_excluded(chart_dir):
+                helm_chart_paths.append(chart_dir)
 
-    summary_details = []
-    if helm_deps_count > 0:
-        summary_details.append(f"- Helm Dependencies: {helm_deps_count} found")
-    if pvc_refs_count > 0:
-        summary_details.append(f"- PVC References: {pvc_refs_count} found")
-    if config_map_refs_count > 0:
-        summary_details.append(f"- ConfigMap References: {config_map_refs_count} found")
-    if source_code_refs_count > 0:
-        summary_details.append(f"- Source Code References: {source_code_refs_count} found")
+        for chart_dir in helm_chart_paths:
+            chart_name = chart_dir.name # Assuming chart directory name is the chart name
+            values_file = chart_dir / 'values.yaml'
+            templates_dir = chart_dir / 'templates'
 
-    if not summary_details:
-        summary_lines.append("No PostgreSQL references found.")
-    else:
-        summary_lines.append("\n".join(summary_details))
+            chart_findings = {}
 
-    step = 1
-    if helm_deps_count > 0:
-        plan_lines.append(f"{step}. Remove Helm Dependency (Chart.yaml)")
-        step += 1
-    if pvc_refs_count > 0:
-        plan_lines.append(f"{step}. Delete Persistent Volume Claims (PVCs)")
-        step += 1
-    if config_map_refs_count > 0:
-        plan_lines.append(f"{step}. Remove Configuration Entries (values.yaml, ConfigMaps)")
-        step += 1
-    if source_code_refs_count > 0:
-        plan_lines.append(f"{step}. Remove Database References from Source Code")
-        step += 1
+            if values_file.exists():
+                found_lines = self.scan_file(values_file)
+                if found_lines:
+                    chart_findings[str(values_file.relative_to(self.repo_path))] = found_lines
 
-    plan_lines.append(f"{step}. Manual Review")
+            if templates_dir.exists():
+                for template_file in templates_dir.rglob('*.yaml'):
+                    if template_file.is_file() and not self._is_excluded(template_file):
+                        found_lines = self.scan_file(template_file)
+                        if found_lines:
+                            chart_findings[str(template_file.relative_to(self.repo_path))] = found_lines
+            
+            if chart_findings:
+                self.helm_findings[chart_name] = chart_findings
+        logging.info("Helm chart scan complete.")
 
-    return "\n".join(summary_lines), "\n".join(plan_lines)
+    def generate_helm_commands(self) -> List[str]:
+        """
+        Generates Helm CLI commands for decommissioning based on findings.
+        """
+        commands = []
+        if self.helm_findings:
+            logging.info("Generating Helm decommissioning commands...")
+            for chart_name in self.helm_findings:
+                # Assuming the release name is directly tied to the chart or can be inferred
+                # For simplicity, using the provided release_name, but in a real scenario,
+                # you might need to parse Chart.yaml or other files for actual release names.
+                commands.append(f"helm uninstall {self.release_name} --namespace {chart_name}")
+                commands.append(f"helm delete {self.release_name} --purge") # --purge is deprecated in Helm 3, use uninstall
+        return commands
+
+    def run(self) -> Dict:
+        """
+        Executes the Helm tool's main logic: scan repository, scan helm charts, and optionally remove.
+        """
+        super().run() # Run the base class scanning and removal
+        self.scan_helm_charts()
+        
+        report = self.generate_report() # Get the base report
+        report["helm_release_name"] = self.release_name
+        report["helm_chart_findings"] = self.helm_findings
+        report["helm_decommission_commands"] = self.generate_helm_commands()
+        return report
 
 def main():
-    """Main function to parse arguments and run the tool."""
-    parser = argparse.ArgumentParser(
-        description="A tool to scan a repository for PostgreSQL database references and optionally remove them.",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    parser.add_argument("repo_path", help="The absolute path to the repository to scan.")
-    parser.add_argument("db_name", help="The name of the PostgreSQL database to search for.")
-    parser.add_argument("--remove", action="store_true", help="If set, creates a new git branch and removes all found references.")
-    parser.add_argument("--branch-name", help="Specify a custom name for the new branch created with --remove.")
+    parser = argparse.ArgumentParser(description="Decommission a PostgreSQL database from a repository.")
+    parser.add_argument('repo_path', help="Path to the Git repository.")
+    parser.add_argument('db_name', help="Name of the database to decommission.")
+    parser.add_argument('--release-name', help="Helm release name to decommission (if applicable).")
+    parser.add_argument('--remove', action='store_true', help="Remove references from files (DANGEROUS without --dry-run).")
+    parser.add_argument('--dry-run', action='store_true', help="Perform a dry run without making actual changes.")
+    parser.add_argument('--verbose', action='store_true', help="Enable verbose logging.")
 
     args = parser.parse_args()
 
-    repo_path = Path(args.repo_path)
-    if not repo_path.is_dir():
-        print(f"Error: The provided repository path '{args.repo_path}' does not exist or is not a directory.", file=sys.stderr)
-        sys.exit(1)
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
-    git_repo = None
-    if args.remove:
-        try:
-            git_repo = GitRepository(str(repo_path))
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
+    if args.remove and not args.dry_run:
+        logging.warning("\nWARNING: Running in --remove mode without --dry-run. This will make permanent changes.\n")
+        confirm = input("Type 'yes' to proceed with permanent changes: ")
+        if confirm.lower() != 'yes':
+            logging.info("Operation cancelled by user.")
+            sys.exit(0)
 
-    tool = PostgreSQLDecommissionTool(str(repo_path), args.db_name, args.remove)
+    if args.release_name:
+        tool = HelmDecommissionTool(args.repo_path, args.db_name, args.release_name, args.remove, args.dry_run)
+    else:
+        tool = PostgreSQLDecommissionTool(args.repo_path, args.db_name, args.remove, args.dry_run)
+
+    report = tool.run()
+
+    logging.info("\n--- Decommissioning Report ---")
+    logging.info(f"Database Name: {report['database_name']}")
+    logging.info(f"Repository Path: {report['repository_path']}")
+    logging.info(f"Dry Run: {report['dry_run']}")
+    logging.info(f"Remove Mode: {report['remove_mode']}")
+
+    if report['findings']:
+        logging.info("\nFound references:")
+        for file, lines in report['findings'].items():
+            logging.info(f"  File: {file}")
+            for line_num, line_content in lines:
+                logging.info(f"    Line {line_num}: {line_content}")
+    else:
+        logging.info("\nNo database references found in code/config files.")
+
+    if 'helm_chart_findings' in report and report['helm_chart_findings']:
+        logging.info("\nFound Helm chart references:")
+        for chart, files in report['helm_chart_findings'].items():
+            logging.info(f"  Chart: {chart}")
+            for file, lines in files.items():
+                logging.info(f"    File: {file}")
+                for line_num, line_content in lines:
+                    logging.info(f"      Line {line_num}: {line_content}")
+    elif 'helm_chart_findings' in report:
+        logging.info("\nNo Helm chart references found.")
+
+    if 'helm_decommission_commands' in report and report['helm_decommission_commands']:
+        logging.info("\nSuggested Helm Decommissioning Commands:")
+        for cmd in report['helm_decommission_commands']:
+            logging.info(f"  - {cmd}")
+
+    if not args.dry_run and args.remove and (report['findings'] or ('helm_chart_findings' in report and report['helm_chart_findings'])):
+        logging.info("\nReferences have been removed from files (if --remove was specified and not --dry-run).")
+    elif args.dry_run:
+        logging.info("\nThis was a dry run. No changes were made to files.")
+    else:
+        logging.info("\nNo changes were made to files.")
+
+    logging.info("--- Report End ---")
+
+def generate_summary_and_plan(repo_path: str, db_name: str) -> Dict[str, Any]:
+    """
+    Generate a summary of changes and a plan for removing database references.
     
-    original_branch = None
-    if git_repo:
-        original_branch = git_repo.get_current_branch()
-        test_branch_name = args.branch_name if args.branch_name else f"chore/{args.db_name}-decommission"
+    Args:
+        repo_path: Path to the repository to scan
+        db_name: Name of the database to decommission
+        
+    Returns:
+        A dictionary containing the summary and plan
+    """
+    tool = PostgreSQLDecommissionTool(repo_path, db_name, remove=False, dry_run=True)
+    tool.scan_repository()
     
-    try:
-        if args.remove and git_repo:
-            if not git_repo.create_test_branch(test_branch_name):
-                print("Failed to create test branch. Aborting.", file=sys.stderr)
-                sys.exit(1)
-
-        tool.run()
-
-        if not args.remove:
-            summary, plan = generate_summary_and_plan(tool.findings, tool.db_name, tool.remove)
-            print("\n📝 Summary of Findings:")
-            print(summary)
-            print("\n📝 Decommissioning Plan:")
-            print(plan)
-        else:
-            if git_repo:
-                print("\n💾 Committing changes...")
-                commit_message = f"feat: Decommission PostgreSQL DB '{tool.db_name}'"
-                if git_repo.commit_changes(commit_message):
-                    print("✅ Changes committed successfully")
-                else:
-                    print("❌ Failed to commit changes")
-
-                print("\n✅ Database references removal process finished!")
-                print(f"🌿 Changes are in branch: {git_repo.test_branch}")
-                if original_branch:
-                    print(f"💡 To revert, run: git checkout {original_branch} && git branch -D {git_repo.test_branch}")
+    # Count the number of files with references
+    file_count = len(tool.findings)
+    total_refs = sum(len(lines) for lines in tool.findings.values())
     
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}", file=sys.stderr)
-        if args.remove and git_repo and original_branch:
-            git_repo.revert_to_original_branch()
-            print(f"🔄 Reverted to original branch: {original_branch}")
-        sys.exit(1)
+    # Generate the summary
+    summary = {
+        'database_name': db_name,
+        'repository_path': str(repo_path),
+        'files_affected': file_count,
+        'total_references': total_refs,
+        'files': []
+    }
+    
+    # Add details for each file
+    for file_path, refs in tool.findings.items():
+        summary['files'].append({
+            'file_path': str(file_path),
+            'reference_count': len(refs),
+            'references': [
+                {'line_number': line, 'content': content}
+                for line, content in refs
+            ]
+        })
+    
+    # Generate the plan
+    plan = {
+        'steps': [
+            {
+                'action': 'remove_postgresql_dependency',
+                'description': 'Remove PostgreSQL dependency from Chart.yaml',
+                'impact': 'Removes the PostgreSQL chart dependency',
+                'files_affected': ['charts/Chart.yaml']
+            },
+            {
+                'action': 'remove_postgresql_config',
+                'description': 'Remove PostgreSQL configuration from values.yaml',
+                'impact': 'Removes PostgreSQL configuration values',
+                'files_affected': ['charts/values.yaml']
+            },
+            {
+                'action': 'remove_pvc',
+                'description': 'Remove PostgreSQL PVC template',
+                'impact': 'Deletes the PVC template file',
+                'files_affected': ['charts/templates/pvc.yaml']
+            },
+            {
+                'action': 'update_source_code',
+                'description': 'Update source code to remove database references',
+                'impact': 'Modifies source files to remove direct database references',
+                'files_affected': [str(f) for f in tool.findings.keys() 
+                                if str(f).endswith(tuple(tool.constraints['source_extensions']))]
+            }
+        ],
+        'rollback_instructions': (
+            'To rollback these changes, you will need to restore from git history.\n'
+            '1. Check git status to see modified files\n'
+            '2. For any modified files, you can restore them using:\n'
+            '   git checkout -- <file>\n\n'
+            '3. For deleted files, you can restore them using:\n'
+            '   git checkout HEAD -- <file>\n\n'
+            '4. If you have committed the changes, you can revert the commit:\n'
+            '   git revert <commit-hash>'
+        )
+    }
+    
+    return {
+        'summary': summary,
+        'plan': plan,
+        'recommendations': [
+            'Review the changes in a test environment before applying to production.',
+            'Ensure you have a backup of your repository before proceeding with removal.',
+            'Test the application thoroughly after removing the database references.'
+        ]
+    }
+
 
 if __name__ == "__main__":
     main()

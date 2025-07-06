@@ -1,43 +1,148 @@
-# PostgreSQL Decommissioning Scanner
+# PostgreSQL Decommissioning Tool
 
-A Python-based tool to scan a repository for references to a PostgreSQL database that needs to be decommissioned. It identifies dependencies in Helm charts, configuration values, Kubernetes resource templates, and source code.
+A production-ready Python tool for identifying and removing PostgreSQL database references in Helm charts, Kubernetes resources, and application code. This tool helps ensure clean database decommissioning by scanning repositories and managing the removal of database references.
 
-This tool is designed to be run in a CI/CD pipeline to ensure all references are removed before deployment.
+## Features
+
+- Scans repositories for PostgreSQL database references
+- Supports Helm charts, Kubernetes resources, and application code
+- Dry-run mode for safe preview of changes
+- Comprehensive reporting of found references
+- Git integration for safe branch-based changes
+- Containerized deployment option
 
 ## Prerequisites
 
-- Python 3.8+
-- `uv` (for package management)
+- Python 3.11+
+- Git 2.25+
+- Docker 20.10+ (for containerized execution)
 
-## Quickstart
+## Installation
 
-1.  **Setup Development Environment**:
-    This will install dependencies using `uv` and clone the target test repository (`cloudnative-pg`).
-    ```
-    make dev-setup
-    ```
+### Local Installation
 
-2.  **Run an End-to-End Scan**:
-    This will scan the cloned `./cloudnative-pg` repository for references to a database named `postgres`.
-    ```
-    make e2e
-    ```
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/decommission-tool.git
+   cd decommission-tool
+   ```
 
-3.  **Run a Custom Scan**:
-    Scan the target repository for a specific database name.
-    ```
-    make scan-db DB_NAME=my_app_db
-    ```
-    The results, including a summary and detailed findings, will be printed to the console and saved to `decommission_findings.json`.
+2. Set up the development environment:
+   ```bash
+   make dev-setup
+   ```
 
-## Makefile Commands
+### Container Installation
 
-- `make install`: Install all Python dependencies.
-- `make dev-setup`: Prepare the full development environment.
-- `make lint`: Run `ruff` and `mypy` to check code quality.
-- `make format`: Format code with `black` and `ruff`.
-- `make test`: Run unit tests located in the `tests/` directory.
-- `make e2e`: Run a full E2E scan on the `./cloudnative-pg` repository.
-- `make scan-db DB_NAME=<name>`: Run a scan for a custom database name.
-- `make ci`: Simulate a CI pipeline run (lint, test, e2e).
-- `make clean`: Remove generated files, virtual environments, and the cloned test repository.
+```bash
+docker build -t decommission-tool .
+```
+
+## Usage
+
+### Basic Usage
+
+```bash
+# Scan a repository for database references
+python -m decommission_tool scan /path/to/repo --db-name my_database
+
+# Scan with removal of references (dry-run by default)
+python -m decommission_tool scan /path/to/repo --db-name my_database --remove
+
+# Actually remove references (requires confirmation)
+python -m decommission_tool scan /path/to/repo --db-name my_database --remove --no-dry-run
+```
+
+### Container Usage
+
+```bash
+# Scan using the container
+docker run --rm -v /path/to/repo:/repo decommission-tool scan /repo --db-name my_database
+```
+
+### Command Line Options
+
+```
+usage: decommission_tool.py scan [-h] [--db-name DB_NAME] [--remove] [--dry-run/--no-dry-run] [--output OUTPUT] [--verbose] repo_path
+
+Scan a repository for PostgreSQL database references.
+
+positional arguments:
+  repo_path            Path to the repository to scan
+
+options:
+  -h, --help           show this help message and exit
+  --db-name DB_NAME    Name of the database to search for
+  --remove             Remove found references (dry-run by default)
+  --dry-run/--no-dry-run
+                       Show what would be changed without making changes (default: --dry-run)
+  --output OUTPUT      Output file for scan results (default: decommission_report.json)
+  --verbose            Enable verbose output
+```
+
+## Development
+
+### Setting Up Development Environment
+
+```bash
+make dev-setup  # Sets up pre-commit hooks and installs dev dependencies
+```
+
+### Running Tests
+
+```bash
+make test          # Run all tests
+make test-unit     # Run unit tests
+make test-e2e      # Run end-to-end tests
+make test-coverage # Run tests with coverage report
+```
+
+### Code Quality
+
+```bash
+make format    # Format code with Black and isort
+make lint      # Run linters
+make typecheck # Run type checking with mypy
+make check     # Run all checks (lint, typecheck, test)
+```
+
+## CI/CD Integration
+
+The tool includes a `Makefile` target for CI integration:
+
+```yaml
+# Example GitHub Actions workflow
+name: Decommission Check
+
+on: [push, pull_request]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          make install
+      - name: Run decommission scan
+        run: |
+          python -m decommission_tool scan . --db-name my_database --output decommission_report.json
+      - name: Upload report
+        uses: actions/upload-artifact@v3
+        with:
+          name: decommission-report
+          path: decommission_report.json
+```
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Contributing
+
+Contributions are welcome! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.

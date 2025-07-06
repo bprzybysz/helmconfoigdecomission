@@ -8,6 +8,13 @@ from typing import List, Dict, Any, Optional
 log_level = os.getenv("MCP_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, log_level), format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+if log_level == "DEBUG":
+    persistence_path = os.getenv("MCP_HOST_REPO_PATH")
+    if persistence_path:
+        logging.debug(f"Persistence path discovered at: {persistence_path}")
+    else:
+        logging.debug("No persistence path (MCP_HOST_REPO_PATH) is set.")
+
 mcp = FastMCP("File System MCP Server")
 file_system_server = FileSystemMCPServer()
 
