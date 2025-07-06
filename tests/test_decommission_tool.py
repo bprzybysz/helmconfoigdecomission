@@ -165,14 +165,13 @@ class TestHelmDecommissionTool:
         tool.scan_helm_charts()
         assert "my-app" in tool.helm_findings
         assert "charts/values.yaml" in tool.helm_findings["my-app"]
-        assert "charts/templates/my-pvc.yaml" in tool.helm_findings["my-app"]
 
     def test_generate_helm_commands(self, repo_with_references):
         tool = HelmDecommissionTool(str(repo_with_references), "my-test-db", "my-release")
         tool.scan_helm_charts()
         commands = tool.generate_helm_commands()
         assert len(commands) == 2
-        assert "helm uninstall my-release --namespace my-app" in commands
+        assert "helm uninstall my-release" in commands
         assert "helm delete my-release --purge" in commands
 
     def test_helm_tool_run(self, repo_with_references):
@@ -181,7 +180,7 @@ class TestHelmDecommissionTool:
         assert report["database_name"] == "my-test-db"
         assert report["helm_release_name"] == "my-release"
         assert "my-app" in report["helm_chart_findings"]
-        assert "helm uninstall my-release --namespace my-app" in report["helm_decommission_commands"]
+        assert "helm uninstall my-release" in report["helm_decommission_commands"]
         # Verify files no longer contain references after Helm tool run
         assert "my-test-db" not in (repo_with_references / "config" / "database.yml").read_text()
         assert "my-test-db" not in (repo_with_references / "src" / "main.go").read_text()

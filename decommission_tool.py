@@ -44,20 +44,6 @@ class PostgreSQLDecommissionTool:
         try:
             content = file_path.read_text(encoding='utf-8')
 
-            if file_path.name == "Chart.yaml":
-                try:
-                    chart_data = yaml.safe_load(content)
-                    if 'dependencies' in chart_data:
-                        for dep in chart_data['dependencies']:
-                            if dep.get('name') == 'postgresql':
-                                found_lines.append((0, "Helm PostgreSQL dependency")) # Dummy line number, actual removal is YAML-aware
-                                break
-                except yaml.YAMLError:
-                    logging.warning(f"Could not parse Chart.yaml: {file_path}")
-            elif file_path.name == "pvc.yaml":
-                if "postgresql" in content:
-                    found_lines.append((0, "PostgreSQL PVC")) # Dummy line number, actual removal is file deletion
-
             # Scan for db_name in all files, including YAMLs (for values.yaml, etc.) and source files
             for i, line in enumerate(content.splitlines()):
                 if re.search(r'\b' + re.escape(self.db_name) + r'\b', line):
@@ -222,53 +208,63 @@ class HelmDecommissionTool(PostgreSQLDecommissionTool):
         self.helm_findings: Dict = {}
 
     def scan_helm_charts(self) -> None:
-        """
-        Scans Helm chart files (values.yaml, templates/*.yaml) for database references.
-        """
-        logging.info(f"Scanning Helm charts for release '{self.release_name}' and DB '{self.db_name}'...")
-        helm_chart_paths = []
-        for path in self.repo_path.rglob('Chart.yaml'):
-            chart_dir = path.parent
-            if not self._is_excluded(chart_dir):
-                helm_chart_paths.append(chart_dir)
+    """
+    Scans Helm chart files (values.yaml, templates/*.yaml) for database references.
+    """
+    logging.info(f"Scanning Helm charts for release '{self.release_name}' and DB '{self.db_name}'...")
+    helm_chart_paths = []
+    for path in self.repo_path.rglob('Chart.yaml'):
+    chart_dir = path.parent
+    if not self._is_excluded(chart_dir):
+    helm_chart_paths.append(chart_dir)
 
-        for chart_dir in helm_chart_paths:
-            chart_name = chart_dir.name # Assuming chart directory name is the chart name
-            values_file = chart_dir / 'values.yaml'
-            templates_dir = chart_dir / 'templates'
+    for chart_dir in helm_chart_paths:
+    chart_yaml_path = chart_dir / 'Chart.yaml'
+    chart_name = chart_dir.name  # Default to dir name
+    if chart_yaml_path.exists():
+            try:
+            with chart_yaml_path.open('r', encoding='utf-8') as f:
+                    chart_data = yaml.safe_load(f)
+                if 'name' in chart_data:
+                chart_name = chart_data['name']
+    except (yaml.YAMLError, IOError) as e:
+    logging.warning(f"Could not read or parse Chart.yaml in {chart_dir}: {e}")
 
-            chart_findings = {}
+    values_file = chart_dir / 'values.yaml'
+    templates_dir = chart_dir / 'templates'
 
-            if values_file.exists():
-                found_lines = self.scan_file(values_file)
-                if found_lines:
-                    chart_findings[str(values_file.relative_to(self.repo_path))] = found_lines
+    chart_findings = {}
 
-            if templates_dir.exists():
-                for template_file in templates_dir.rglob('*.yaml'):
-                    if template_file.is_file() and not self._is_excluded(template_file):
-                        found_lines = self.scan_file(template_file)
-                        if found_lines:
-                            chart_findings[str(template_file.relative_to(self.repo_path))] = found_lines
-            
-            if chart_findings:
-                self.helm_findings[chart_name] = chart_findings
-        logging.info("Helm chart scan complete.")
+    if values_file.exists():
+        found_lines = self.scan_file(values_file)
+        if found_lines:
+        chart_findings[str(values_file.relative_to(self.repo_path))] = found_lines
+
+        if templates_dir.exists():
+            for template_file in templates_dir.rglob('*.yaml'):
+                if template_file.is_file() and not self._is_excluded(template_file):
+                    found_lines = self.scan_file(template_file)
+                    if found_lines:
+                        chart_findings[str(template_file.relative_to(self.repo_path))] = found_lines
+        
+        if chart_findings:
+            self.helm_findings[chart_name] = chart_findings
+    logging.info("Helm chart scan complete.")
 
     def generate_helm_commands(self) -> List[str]:
-        """
-        Generates Helm CLI commands for decommissioning based on findings.
-        """
-        commands = []
-        if self.helm_findings:
-            logging.info("Generating Helm decommissioning commands...")
-            for chart_name in self.helm_findings:
-                # Assuming the release name is directly tied to the chart or can be inferred
-                # For simplicity, using the provided release_name, but in a real scenario,
-                # you might need to parse Chart.yaml or other files for actual release names.
-                commands.append(f"helm uninstall {self.release_name} --namespace {chart_name}")
-                commands.append(f"helm delete {self.release_name} --purge") # --purge is deprecated in Helm 3, use uninstall
-        return commands
+    """
+    Generates Helm CLI commands for decommissioning based on findings.
+    """
+    commands = []
+    if self.helm_findings:
+    logging.info("Generating Helm decommissioning commands...")
+    for chart_name in self.helm_findings:
+    # Assuming the release name is directly tied to the chart or can be inferred
+    # For simplicity, using the provided release_name, but in a real scenario,
+    # you might need to parse Chart.yaml or other files for actual release names.
+    commands.append(f"helm uninstall {self.release_name}")
+    commands.append(f"helm delete {self.release_name} --purge") # --purge is deprecated in Helm 3, use uninstall
+    return commands
 
     def run(self) -> Dict:
         """
