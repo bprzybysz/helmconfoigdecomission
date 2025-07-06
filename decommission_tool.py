@@ -102,186 +102,151 @@ class PostgreSQLDecommissionTool:
             if delete_branch_result.returncode != 0:
                 print(f"Failed to delete test branch '{self.test_branch}': {delete_branch_result.stderr}", file=sys.stderr)
         
-        print(f"Reverted changes and returned to branch '{self.original_branch}'")
-        self.test_branch = None
         return True
 
-    def _is_valid_path(self, path: Path) -> bool:
-        """Check if a path should be included in the scan."""
-        if any(part in self.constraints['exclude_dirs'] for part in path.parts):
-            return False
-        try:
-            if path.stat().st_size > self.constraints['max_file_size']:
-                return False
-        except FileNotFoundError:
-            return False
-        return True
-
-    def _scan_source_code(self, file_path: Path) -> List[Dict]:
-        """Scan source code for database name."""
-        found = []
-        try:
-            content = file_path.read_text(encoding='utf-8')
-            pattern = re.compile(re.escape(self.db_name), re.IGNORECASE)
-            if pattern.search(content):
-                lines = content.splitlines()
-                matched_lines = [i + 1 for i, line in enumerate(lines) if pattern.search(line)]
-                if matched_lines:
-                    found.append({
-                        'file': str(file_path.relative_to(self.repo_path)),
-                        'lines': matched_lines
-                    })
-        except (UnicodeDecodeError, IOError):
-            pass
-        return found
-
-    def _scan_config_file(self, file_path: Path) -> List[Dict]:
-        """Scan config files for database name."""
-        found = []
-        try:
-            content = file_path.read_text(encoding='utf-8')
-            if self.db_name in content:
-                lines = content.splitlines()
-                matched_lines = [i + 1 for i, line in enumerate(lines) if self.db_name in line]
-                if matched_lines:
-                    found.append({
-                        'file': str(file_path.relative_to(self.repo_path)),
-                        'lines': matched_lines
-                    })
-        except (UnicodeDecodeError, IOError):
-            pass
-        return found
-
-    def _scan_helm_chart(self, file_path: Path) -> List[Dict]:
-        """Scan Chart.yaml for PostgreSQL dependency."""
-        if file_path.name != 'Chart.yaml':
-            return []
+    def get_git_status(self) -> Dict[str, List[str]]:
+        """Get git status."""
+        status_result = self._run_git_command(['git', 'status', '--porcelain'])
+        if status_result.returncode != 0:
+            return {'error': ['Could not get git status.']}
         
-        found = []
-        try:
-            with file_path.open('r', encoding='utf-8') as f:
-                chart = yaml.safe_load(f)
-                if 'dependencies' in chart and chart['dependencies']:
-                    for dep in chart['dependencies']:
-                        if 'postgresql' in dep.get('name', ''):
-                            found.append({
-                                'file': str(file_path.relative_to(self.repo_path)),
-                                'content': f"name: {dep['name']}, version: {dep.get('version', 'N/A')}"
-                            })
-        except (yaml.YAMLError, IOError):
-            pass
-        return found
+        status = {'modified': [], 'deleted': [], 'added': [], 'untracked': []}
+        for line in status_result.stdout.strip().splitlines():
+            if line.startswith(' M '):
+                status['modified'].append(line[3:])
+            elif line.startswith(' D '):
+                status['deleted'].append(line[3:])
+            elif line.startswith('A  '):
+                status['added'].append(line[3:])
+            elif line.startswith('?? '):
+                status['untracked'].append(line[3:])
+        return status
 
-    def _scan_pvc(self, file_path: Path) -> List[Dict]:
-        """Scan YAML files for PVCs related to postgres."""
-        found = []
-        try:
-            content = file_path.read_text(encoding='utf-8')
-            if 'PersistentVolumeClaim' in content and ('postgres' in content or 'pg' in content):
-                found.append({
-                    'file': str(file_path.relative_to(self.repo_path)),
-                    'content': 'Potential PostgreSQL PVC found'
-                })
-        except (UnicodeDecodeError, IOError):
-            pass
-        return found
+    def _is_excluded(self, path: Path) -> bool:
+        """Check if a file or directory should be excluded from scan."""
+        return any(part in self.constraints['exclude_dirs'] for part in path.parts)
 
-    def scan_repository(self) -> Dict[str, List]:
-        """Scan for all PostgreSQL references with constraints"""
-        if not self.repo_path.is_dir():
-            raise FileNotFoundError(f"Repository path does not exist or is not a directory: {self.repo_path}")
-
-        all_files = [p for p in self.repo_path.rglob('*') if p.is_file() and self._is_valid_path(p)]
-        
-        findings = {
+    def scan_repository(self) -> Dict:
+        """Scan the repository to find all references to the database."""
+        self.findings = {
             'helm_dependencies': [],
-            'config_references': [],
             'pvc_references': [],
-            'source_code_references': []
+            'config_map_references': [],
+            'source_code_references': [],
+            'total_scanned': 0,
+            'total_found': 0
         }
+        found_files = set()
 
-        for file_path in all_files:
-            if sum(len(v) for v in findings.values()) >= self.max_findings:
-                break
+        for file_path in self.repo_path.rglob('*'):
+            if file_path.is_file() and not self._is_excluded(file_path):
+                self.findings['total_scanned'] += 1
+                try:
+                    content = file_path.read_text(encoding='utf-8')
+                    if self.db_name in content or 'postgresql' in content.lower():
+                        found_files.add(str(file_path))
+                        if file_path.name == 'Chart.yaml':
+                            self.findings['helm_dependencies'].append(str(file_path))
+                        elif 'pvc' in file_path.name.lower() and file_path.suffix in self.constraints['yaml_extensions']:
+                            self.findings['pvc_references'].append(str(file_path))
+                        elif file_path.suffix in self.constraints['yaml_extensions']:
+                            self.findings['config_map_references'].append(str(file_path))
+                        elif file_path.suffix in self.constraints['source_extensions']:
+                            self.findings['source_code_references'].append(str(file_path))
+                except (UnicodeDecodeError, OSError) as e:
+                    print(f"Could not read file {file_path}: {e}", file=sys.stderr)
 
-            file_suffix = file_path.suffix
-            
-            if file_suffix in self.constraints['source_extensions']:
-                findings['source_code_references'].extend(self._scan_source_code(file_path))
-
-            if file_suffix in self.constraints['yaml_extensions']:
-                findings['helm_dependencies'].extend(self._scan_helm_chart(file_path))
-                findings['pvc_references'].extend(self._scan_pvc(file_path))
-                findings['config_references'].extend(self._scan_config_file(file_path))
-
-            if file_suffix in self.constraints['config_extensions']:
-                findings['config_references'].extend(self._scan_config_file(file_path))
-        
-        unique_configs = {item['file']: item for item in findings['config_references']}
-        findings['config_references'] = list(unique_configs.values())
-
-        self.findings = findings
-        return findings
+        self.findings['total_found'] = len(found_files)
+        return self.findings
 
     def remove_references(self):
         """Remove found references from files."""
         if not self.remove:
-            print("Removal flag not set. Skipping modification.")
             return
 
-        for item in self.findings.get('helm_dependencies', []):
-            file_path = self.repo_path / item['file']
+        # Remove Helm dependencies
+        for file_path_str in self.findings.get('helm_dependencies', []):
+            file_path = Path(file_path_str)
             try:
-                with file_path.open('r+', encoding='utf-8') as f:
+                with file_path.open('r') as f:
                     chart = yaml.safe_load(f)
-                    if 'dependencies' in chart:
-                        chart['dependencies'] = [dep for dep in chart['dependencies'] if 'postgresql' not in dep.get('name', '')]
-                        f.seek(0)
+                if 'dependencies' in chart:
+                    chart['dependencies'] = [dep for dep in chart['dependencies'] if dep.get('name') != 'postgresql']
+                    with file_path.open('w') as f:
                         yaml.dump(chart, f)
-                        f.truncate()
-            except (IOError, yaml.YAMLError) as e:
-                print(f"Error updating {file_path}: {e}")
+                    self._run_git_command(['git', 'add', str(file_path)])
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}", file=sys.stderr)
 
-        for item in self.findings.get('config_references', []) + self.findings.get('source_code_references', []):
-            file_path = self.repo_path / item['file']
+        # Remove PVC files
+        for file_path_str in self.findings.get('pvc_references', []):
+            file_path = Path(file_path_str)
             try:
-                content = file_path.read_text(encoding='utf-8')
-                
-                if file_path.name == 'values.yaml':
-                    content = re.sub(r'^\s*postgresql:.*?(?=\n\S|\Z)', '', content, flags=re.DOTALL | re.MULTILINE)
+                os.remove(file_path)
+                self._run_git_command(['git', 'rm', str(file_path)])
+            except OSError as e:
+                print(f"Error deleting {file_path}: {e}", file=sys.stderr)
 
-                lines = content.splitlines()
-                new_lines = [line for line in lines if self.db_name not in line]
-                file_path.write_text('\n'.join(new_lines), encoding='utf-8')
-            except IOError as e:
-                print(f"Error updating {file_path}: {e}")
+        # Remove from other YAMLs and source code
+        all_files_to_clean = set(self.findings.get('config_map_references', [])) | set(self.findings.get('source_code_references', []))
+        for file_path_str in all_files_to_clean:
+            file_path = Path(file_path_str)
+            try:
+                lines = file_path.read_text(encoding='utf-8').splitlines()
+                new_lines = [line for line in lines if self.db_name not in line and 'postgresql' not in line.lower()]
+                if len(lines) != len(new_lines):
+                    file_path.write_text('\n'.join(new_lines) + '\n', encoding='utf-8')
+                    self._run_git_command(['git', 'add', str(file_path)])
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}", file=sys.stderr)
 
-def generate_summary_and_plan(findings: Dict[str, List], db_name: str, remove: bool = False) -> Tuple[str, str]:
-    """Generate a summary and decommissioning plan based on findings."""
-    summary_lines = [f"Decommissioning Plan for PostgreSQL Database: {db_name}"]
-    plan_lines = []
-    
-    summary_lines.append("\n--- Summary of Findings ---")
-    summary_lines.append(f"- Helm Dependencies: {len(findings.get('helm_dependencies', []))} found")
-    summary_lines.append(f"- Configuration References: {len(findings.get('config_references', []))} found")
-    summary_lines.append(f"- PVC References: {len(findings.get('pvc_references', []))} found")
-    summary_lines.append(f"- Source Code References: {len(findings.get('source_code_references', []))} found")
-    
-    plan_lines.append("\n--- Decommissioning Plan ---")
+    def show_diff(self, max_lines: int = 30) -> str:
+        """Show git diff."""
+        diff_result = self._run_git_command(['git', 'diff'])
+        if diff_result.returncode != 0:
+            return "Could not get diff."
+        
+        diff_lines = diff_result.stdout.splitlines()
+        if max_lines > 0 and len(diff_lines) > max_lines:
+            return '\n'.join(diff_lines[:max_lines]) + f"\n... (diff truncated to {max_lines} lines)"
+        return '\n'.join(diff_lines)
+
+    def commit_changes(self, message: Optional[str] = None) -> bool:
+        """Commit changes."""
+        if not message:
+            message = f"feat: Decommission {self.db_name}"
+        
+        commit_result = self._run_git_command(['git', 'commit', '-m', message])
+        if commit_result.returncode != 0:
+            print(f"Failed to commit changes: {commit_result.stderr}", file=sys.stderr)
+            return False
+        
+        return True
+
+    def run(self):
+        """Run the decommissioning tool."""
+        self.scan_repository()
+        if self.remove:
+            self.remove_references()
+
+def generate_summary_and_plan(findings: Dict, db_name: str, remove: bool) -> Tuple[str, str]:
+    summary_lines = [
+        f"This report summarizes the findings for decommissioning the PostgreSQL database '{db_name}'.",
+        f"- Total files scanned: {findings.get('total_scanned', 0)}",
+        f"- Total files with references: {findings.get('total_found', 0)}"
+    ]
+
+    plan_lines = ["Decommissioning Plan:"]
     step = 1
-    
     if findings.get('helm_dependencies'):
-        plan_lines.append(f"{step}. Remove Helm Dependency")
+        plan_lines.append(f"{step}. Remove Helm dependencies from Chart.yaml files.")
         step += 1
-        
-    if findings.get('config_references'):
-        plan_lines.append(f"{step}. Remove Configuration Entries")
-        step += 1
-        
     if findings.get('pvc_references'):
-        plan_lines.append(f"{step}. Delete Persistent Volume Claims (PVCs)")
+        plan_lines.append(f"{step}. Delete PostgreSQL PVC YAML files.")
         step += 1
-        
+    if findings.get('config_map_references'):
+        plan_lines.append(f"{step}. Remove database connection details from ConfigMaps.")
+        step += 1
     if findings.get('source_code_references'):
         plan_lines.append(f"{step}. Remove Database References from Source Code")
         step += 1
@@ -290,60 +255,57 @@ def generate_summary_and_plan(findings: Dict[str, List], db_name: str, remove: b
     
     return "\n".join(summary_lines), "\n".join(plan_lines)
 
-def main():
+if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python decommission_tool.py <repo_path> <db_name> [--remove]", file=sys.stderr)
         sys.exit(1)
-        
+    
     repo_path = sys.argv[1]
     db_name = sys.argv[2]
-    should_remove = '--remove' in sys.argv
-    output_file = Path("decommission_findings.json")
+    remove = "--remove" in sys.argv
 
-    tool = PostgreSQLDecommissionTool(repo_path, db_name, remove=should_remove)
-
+    tool = PostgreSQLDecommissionTool(repo_path, db_name, remove)
+    
     try:
-        if should_remove:
+        if remove:
             if not tool.create_test_branch():
+                print("Failed to create test branch. Aborting.", file=sys.stderr)
                 sys.exit(1)
+            print(f"🌿 Switched to new branch: {tool.test_branch}")
 
-        findings = tool.scan_repository()
-        
-        summary, plan = generate_summary_and_plan(findings, db_name, should_remove)
-        
-        print(summary)
-        print(plan)
-        
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump({'summary': summary, 'plan': plan, 'findings': findings}, f, indent=2)
-        
-        print(f"\n📄 Detailed findings exported to: {output_file}")
+        tool.run()
 
-        if should_remove:
-            print("\n🚀 Starting file modification process...")
-            tool.remove_references()
-            print("\n✅ Database references removal process finished!")
+        if not remove:
+            summary, plan = generate_summary_and_plan(tool.findings, tool.db_name, tool.remove)
+            print("\n📝 Summary of Findings:")
+            print(summary)
+            print("\n📝 Decommissioning Plan:")
+            print(plan)
+        else:
+            # Show git status after changes
+            status_after = tool.get_git_status()
+            print("\n📋 Files after modification:")
+            for status_type, files in status_after.items():
+                if files and status_type != 'error':
+                    print(f"  {status_type}: {files}")
             
+            # Show diff
+            if status_after.get('modified') or status_after.get('deleted'):
+                print("\n📝 Changes made:")
+                print(tool.show_diff(max_lines=30))
+            
+            # Commit changes
+            print("\n💾 Committing changes...")
             commit_message = f"feat: Decommission {db_name}"
             if tool.commit_changes(commit_message):
-                print(f"Changes committed to branch '{tool.test_branch}'. Please review and create a pull request.")
+                print("✅ Changes committed successfully")
             else:
-                print("Failed to commit changes. Reverting...", file=sys.stderr)
-                tool.revert_changes()
-
-        else:
-            print("\n💡 Run with --remove flag to actually modify files")
-
-        if findings.get('helm_dependencies') or findings.get('pvc_references'):
-             print("\n❌ Critical findings detected. Exiting with error code.", file=sys.stderr)
-             sys.exit(2)
+                print("❌ Failed to commit changes")
+            
+            print("\n✅ Database references removal process finished!")
+            print(f"🌿 Changes are in branch: {tool.test_branch}")
+            print("💡 Use git commands to merge or discard changes")
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}", file=sys.stderr)
-        if tool.test_branch:
-            print("Reverting changes due to error...", file=sys.stderr)
-            tool.revert_changes()
         sys.exit(1)
-
-if __name__ == "__main__":
-    main()
