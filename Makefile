@@ -55,6 +55,25 @@ test:
 	@echo "🧪 Running unit tests..."
 	@$(PYTHON) -m pytest tests/ -v --tb=short
 
+# Run all tests with coverage
+test-coverage:
+	@echo "🧪 Running tests with coverage..."
+	@$(PYTHON) -m pytest tests/ -v --cov=decommission_tool --cov-report=html --cov-report=term
+
+# Run specific test categories
+test-unit:
+	@echo "🧪 Running unit tests..."
+	@$(PYTHON) -m pytest tests/test_decommission_tool.py -v
+
+test-integration:
+	@echo "🧪 Running integration tests..."
+	@$(PYTHON) -m pytest tests/test_integration.py -v
+
+# Run tests with detailed output
+test-verbose:
+	@echo "🧪 Running tests with verbose output..."
+	@$(PYTHON) -m pytest tests/ -v -s --tb=long
+
 # Run e2e tests
 e2e: setup-target
 	@echo "🔄 Running e2e scan against $(TARGET_REPO_DIR)..."
