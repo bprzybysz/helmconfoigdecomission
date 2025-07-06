@@ -64,17 +64,20 @@ class PostgreSQLDecommissionTool:
             print(f"Error creating test branch: {e}", file=sys.stderr)
             return False
 
-    def commit_changes(self, message: str) -> bool:
+    def commit_changes(self, message: Optional[str] = None) -> bool:
         """Commit changes to the test branch."""
         if not self.test_branch:
             print("Not on a test branch. Cannot commit.", file=sys.stderr)
             return False
-
+        
+        if not message:
+            message = f"chore: remove PostgreSQL database '{self.db_name}' references"
+        
         add_result = self._run_git_command(['git', 'add', '.'])
         if add_result.returncode != 0:
             print(f"Failed to stage changes: {add_result.stderr}", file=sys.stderr)
             return False
-
+        
         commit_result = self._run_git_command(['git', 'commit', '-m', message])
         if commit_result.returncode != 0:
             if "nothing to commit" in commit_result.stdout or "nothing to commit" in commit_result.stderr:
@@ -82,8 +85,29 @@ class PostgreSQLDecommissionTool:
                 return True
             print(f"Failed to commit changes: {commit_result.stderr}", file=sys.stderr)
             return False
-
+        
         print(f"Committed changes with message: '{message}'")
+        return True
+
+    def switch_back_to_original(self) -> bool:
+        """Switch back to original branch"""
+        return self.revert_changes()
+
+    def delete_test_branch(self) -> bool:
+        """Delete the test branch"""
+        if not self.test_branch:
+            return True
+        
+        # Switch to original branch first
+        if not self.switch_back_to_original():
+            return False
+        
+        delete_result = self._run_git_command(['git', 'branch', '-D', self.test_branch])
+        if delete_result.returncode != 0:
+            print(f"Failed to delete test branch '{self.test_branch}': {delete_result.stderr}", file=sys.stderr)
+            return False
+        
+        print(f"✅ Deleted test branch: {self.test_branch}")
         return True
 
     def revert_changes(self) -> bool:
@@ -143,16 +167,35 @@ class PostgreSQLDecommissionTool:
                 self.findings['total_scanned'] += 1
                 try:
                     content = file_path.read_text(encoding='utf-8')
-                    if self.db_name in content or 'postgresql' in content.lower():
+                    added_to_findings = False
+
+                    if file_path.name == 'Chart.yaml':
+                        try:
+                            chart_content = yaml.safe_load(content)
+                            for dep in chart_content.get('dependencies', []):
+                                if dep.get('name') == 'postgresql':
+                                    self.findings['helm_dependencies'].append({'file': str(file_path), 'dependency': dep})
+                                    added_to_findings = True
+                        except yaml.YAMLError:
+                            pass # Ignore if not a valid YAML
+                    
+                    if 'pvc' in file_path.name.lower() and file_path.suffix in self.constraints['yaml_extensions']:
+                        if 'postgres' in content.lower():
+                            self.findings['pvc_references'].append({'file': str(file_path)})
+                            added_to_findings = True
+                    
+                    if file_path.suffix in self.constraints['yaml_extensions'] and not added_to_findings: # Avoid double counting if already added as Chart or PVC
+                        if self.db_name in content or 'postgresql' in content.lower():
+                            self.findings['config_map_references'].append({'file': str(file_path)})
+                            added_to_findings = True
+                    
+                    if file_path.suffix in self.constraints['source_extensions'] and not added_to_findings: # Avoid double counting
+                        if self.db_name in content or 'postgresql' in content.lower():
+                            self.findings['source_code_references'].append({'file': str(file_path)})
+                            added_to_findings = True
+                    
+                    if added_to_findings:
                         found_files.add(str(file_path))
-                        if file_path.name == 'Chart.yaml':
-                            self.findings['helm_dependencies'].append(str(file_path))
-                        elif 'pvc' in file_path.name.lower() and file_path.suffix in self.constraints['yaml_extensions']:
-                            self.findings['pvc_references'].append(str(file_path))
-                        elif file_path.suffix in self.constraints['yaml_extensions']:
-                            self.findings['config_map_references'].append(str(file_path))
-                        elif file_path.suffix in self.constraints['source_extensions']:
-                            self.findings['source_code_references'].append(str(file_path))
                 except (UnicodeDecodeError, OSError) as e:
                     print(f"Could not read file {file_path}: {e}", file=sys.stderr)
 
@@ -165,8 +208,8 @@ class PostgreSQLDecommissionTool:
             return
 
         # Remove Helm dependencies
-        for file_path_str in self.findings.get('helm_dependencies', []):
-            file_path = Path(file_path_str)
+        for finding in self.findings.get('helm_dependencies', []):
+            file_path = Path(finding['file'])
             try:
                 with file_path.open('r') as f:
                     chart = yaml.safe_load(f)
@@ -179,8 +222,8 @@ class PostgreSQLDecommissionTool:
                 print(f"Error processing {file_path}: {e}", file=sys.stderr)
 
         # Remove PVC files
-        for file_path_str in self.findings.get('pvc_references', []):
-            file_path = Path(file_path_str)
+        for finding in self.findings.get('pvc_references', []):
+            file_path = Path(finding['file'])
             try:
                 os.remove(file_path)
                 self._run_git_command(['git', 'rm', str(file_path)])
@@ -188,15 +231,51 @@ class PostgreSQLDecommissionTool:
                 print(f"Error deleting {file_path}: {e}", file=sys.stderr)
 
         # Remove from other YAMLs and source code
-        all_files_to_clean = set(self.findings.get('config_map_references', [])) | set(self.findings.get('source_code_references', []))
+        all_files_to_clean = set(f['file'] for f in self.findings.get('config_map_references', [])) | set(f['file'] for f in self.findings.get('source_code_references', []))
         for file_path_str in all_files_to_clean:
             file_path = Path(file_path_str)
             try:
-                lines = file_path.read_text(encoding='utf-8').splitlines()
-                new_lines = [line for line in lines if self.db_name not in line and 'postgresql' not in line.lower()]
-                if len(lines) != len(new_lines):
-                    file_path.write_text('\n'.join(new_lines) + '\n', encoding='utf-8')
+                if file_path.suffix in ['.yaml', '.yml']:
+                    with file_path.open('r') as f:
+                        data = yaml.safe_load(f)
+                    
+                    def remove_from_dict(obj, db_name):
+                        if isinstance(obj, dict):
+                            keys_to_delete = []
+                            for k, v in list(obj.items()): # Iterate over a copy since we're modifying
+                                if isinstance(v, (dict, list)):
+                                    remove_from_dict(v, db_name)
+                                elif isinstance(v, str):
+                                    if db_name in v or 'postgresql' in v.lower():
+                                        # Replace the specific database name or 'postgresql' string
+                                        obj[k] = v.replace(db_name, '').replace('postgresql', '')
+                                if db_name in str(k) or 'postgresql' in str(k).lower():
+                                    keys_to_delete.append(k)
+                            for k in keys_to_delete:
+                                del obj[k]
+                        elif isinstance(obj, list):
+                            items_to_remove_indices = []
+                            for i, item in enumerate(obj):
+                                if isinstance(item, (dict, list)):
+                                    remove_from_dict(item, db_name)
+                                elif isinstance(item, str):
+                                    if db_name in item or 'postgresql' in item.lower():
+                                        # Replace the specific database name or 'postgresql' string
+                                        obj[i] = item.replace(db_name, '').replace('postgresql', '')
+                            # Remove empty strings or items that become irrelevant after replacement
+                            obj[:] = [item for item in obj if item not in ('', None)]
+                    
+                    remove_from_dict(data, self.db_name)
+                    
+                    with file_path.open('w') as f:
+                        yaml.dump(data, f)
                     self._run_git_command(['git', 'add', str(file_path)])
+                else:
+                    lines = file_path.read_text(encoding='utf-8').splitlines()
+                    new_lines = [line for line in lines if self.db_name not in line and 'postgresql' not in line.lower()]
+                    if len(lines) != len(new_lines):
+                        file_path.write_text('\n'.join(new_lines) + '\n', encoding='utf-8')
+                        self._run_git_command(['git', 'add', str(file_path)])
             except Exception as e:
                 print(f"Error processing {file_path}: {e}", file=sys.stderr)
 
@@ -231,28 +310,50 @@ class PostgreSQLDecommissionTool:
 
 def generate_summary_and_plan(findings: Dict, db_name: str, remove: bool) -> Tuple[str, str]:
     summary_lines = [
-        f"This report summarizes the findings for decommissioning the PostgreSQL database '{db_name}'.",
-        f"- Total files scanned: {findings.get('total_scanned', 0)}",
-        f"- Total files with references: {findings.get('total_found', 0)}"
+        f"Decommissioning Plan for PostgreSQL Database: {db_name}",
+        "" # Placeholder for detailed summary
     ]
 
     plan_lines = ["Decommissioning Plan:"]
+    
+    # Detailed summary of findings
+    helm_deps_count = len(findings.get('helm_dependencies', []))
+    pvc_refs_count = len(findings.get('pvc_references', []))
+    config_map_refs_count = len(findings.get('config_map_references', []))
+    source_code_refs_count = len(findings.get('source_code_references', []))
+
+    summary_details = []
+    if helm_deps_count > 0:
+        summary_details.append(f"- Helm Dependencies: {helm_deps_count} found")
+    if pvc_refs_count > 0:
+        summary_details.append(f"- PVC References: {pvc_refs_count} found")
+    if config_map_refs_count > 0:
+        summary_details.append(f"- ConfigMap References: {config_map_refs_count} found")
+    if source_code_refs_count > 0:
+        summary_details.append(f"- Source Code References: {source_code_refs_count} found")
+
+    if summary_details:
+        summary_lines.append("\n".join(summary_details))
+    else:
+        summary_lines.append("No PostgreSQL references found.")
+
+    # Decommissioning plan based on findings
     step = 1
-    if findings.get('helm_dependencies'):
-        plan_lines.append(f"{step}. Remove Helm dependencies from Chart.yaml files.")
+    if helm_deps_count > 0:
+        plan_lines.append(f"{step}. Remove Helm Dependency (Chart.yaml)")
         step += 1
-    if findings.get('pvc_references'):
-        plan_lines.append(f"{step}. Delete PostgreSQL PVC YAML files.")
+    if pvc_refs_count > 0:
+        plan_lines.append(f"{step}. Delete Persistent Volume Claims (PVCs)")
         step += 1
-    if findings.get('config_map_references'):
-        plan_lines.append(f"{step}. Remove database connection details from ConfigMaps.")
+    if config_map_refs_count > 0:
+        plan_lines.append(f"{step}. Remove Configuration Entries (values.yaml, ConfigMaps)")
         step += 1
-    if findings.get('source_code_references'):
+    if source_code_refs_count > 0:
         plan_lines.append(f"{step}. Remove Database References from Source Code")
         step += 1
-        
+
     plan_lines.append(f"{step}. Manual Review")
-    
+
     return "\n".join(summary_lines), "\n".join(plan_lines)
 
 if __name__ == "__main__":
@@ -304,7 +405,8 @@ if __name__ == "__main__":
             
             print("\n✅ Database references removal process finished!")
             print(f"🌿 Changes are in branch: {tool.test_branch}")
-            print("💡 Use git commands to merge or discard changes")
+            print("💡 Use 'git checkout <original-branch>' to return to original state")
+            print("💡 Or run with revert flag to automatically clean up")
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}", file=sys.stderr)

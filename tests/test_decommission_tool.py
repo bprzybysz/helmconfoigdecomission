@@ -135,9 +135,9 @@ def test_scan_repository_finds_all_references(temp_repo: Path):
     assert len(findings['helm_dependencies']) == 1
     assert 'Chart.yaml' in findings['helm_dependencies'][0]['file']
 
-    assert len(findings['config_references']) > 0
-    assert any('values.yaml' in f['file'] for f in findings['config_references'])
-    assert any('configmap.yaml' in f['file'] for f in findings['config_references'])
+    assert len(findings['config_map_references']) > 0
+    assert any('values.yaml' in f['file'] for f in findings['config_map_references'])
+    assert any('configmap.yaml' in f['file'] for f in findings['config_map_references'])
 
     assert len(findings['pvc_references']) == 1
     assert 'pvc.yaml' in findings['pvc_references'][0]['file']
@@ -177,7 +177,7 @@ def test_generate_summary_and_plan():
     """Test the generation of a summary and decommissioning plan."""
     findings = {
         'helm_dependencies': [{'file': 'charts/Chart.yaml', 'content': 'name: postgresql'}],
-        'config_references': [{'file': 'charts/values.yaml', 'lines': [5, 10]}],
+        'config_map_references': [{'file': 'charts/values.yaml', 'lines': [5, 10]}],
         'pvc_references': [{'file': 'templates/pvc.yaml', 'content': 'name: postgres-data-pvc'}],
         'source_code_references': [{'file': 'src/main.go', 'lines': [10]}]
     }
@@ -185,9 +185,9 @@ def test_generate_summary_and_plan():
     summary, plan = generate_summary_and_plan(findings, "my_test_db", True)
     
     assert "Decommissioning Plan for PostgreSQL Database: my_test_db" in summary
-    assert "1. Remove Helm Dependency" in plan
-    assert "2. Remove Configuration Entries" in plan
-    assert "3. Delete Persistent Volume Claims (PVCs)" in plan
+    assert "1. Remove Helm Dependency (Chart.yaml)" in plan
+    assert "2. Delete Persistent Volume Claims (PVCs)" in plan
+    assert "3. Remove Configuration Entries (values.yaml, ConfigMaps)" in plan
     assert "4. Remove Database References from Source Code" in plan
     assert "5. Manual Review" in plan
 
@@ -212,7 +212,7 @@ def test_integration_with_real_helm_chart(temp_repo: Path):
         
         # Verify we found the expected types of references
         assert any('Chart.yaml' in f['file'] for f in findings['helm_dependencies'])
-        assert any('values.yaml' in f['file'] for f in findings['config_references'])
+        assert any('values.yaml' in f['file'] for f in findings['config_map_references'])
         assert any('pvc.yaml' in f['file'] for f in findings['pvc_references'])
         assert any('.go' in f['file'] for f in findings['source_code_references'])
         assert any('.py' in f['file'] for f in findings['source_code_references'])
