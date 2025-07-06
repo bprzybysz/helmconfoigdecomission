@@ -3,8 +3,9 @@ import re
 import sys
 import json
 import yaml
+import subprocess
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 class PostgreSQLDecommissionTool:
     def __init__(self, repo_path: str, db_name: str, remove: bool = False, max_findings: int = 100):
@@ -13,6 +14,8 @@ class PostgreSQLDecommissionTool:
         self.remove = remove
         self.max_findings = max_findings
         self.findings = {}
+        self.original_branch = None
+        self.test_branch = None
         self.constraints = {
             'yaml_extensions': ['.yaml', '.yml'],
             'config_extensions': ['.conf', '.env', '.properties', '.toml'],
@@ -20,6 +23,88 @@ class PostgreSQLDecommissionTool:
             'max_file_size': 10 * 1024 * 1024,  # 10MB limit
             'exclude_dirs': ['.git', 'node_modules', '__pycache__', '.pytest_cache', 'vendor', 'target', 'build', 'dist']
         }
+
+    def _run_git_command(self, cmd: List[str]) -> subprocess.CompletedProcess:
+        """Run git command and return result"""
+        return subprocess.run(cmd, cwd=self.repo_path, capture_output=True, text=True)
+
+    def get_current_branch(self) -> str:
+        """Get the current git branch name."""
+        result = self._run_git_command(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return ""
+
+    def create_test_branch(self, branch_name: Optional[str] = None) -> bool:
+        """Create and checkout test branch for safe modifications"""
+        try:
+            self.original_branch = self.get_current_branch()
+            if not self.original_branch:
+                print("Not a git repository or no branch checked out.", file=sys.stderr)
+                return False
+
+            if not branch_name:
+                branch_name = f"chore/{self.db_name}-decommission"
+            self.test_branch = branch_name
+
+            result = self._run_git_command(['git', 'show-ref', '--verify', f'refs/heads/{self.test_branch}'])
+            if result.returncode == 0:
+                checkout_result = self._run_git_command(['git', 'checkout', self.test_branch])
+            else:
+                checkout_result = self._run_git_command(['git', 'checkout', '-b', self.test_branch])
+
+            if checkout_result.returncode != 0:
+                print(f"Failed to checkout branch '{self.test_branch}': {checkout_result.stderr}", file=sys.stderr)
+                return False
+
+            print(f"Switched to new branch '{self.test_branch}'")
+            return True
+
+        except Exception as e:
+            print(f"Error creating test branch: {e}", file=sys.stderr)
+            return False
+
+    def commit_changes(self, message: str) -> bool:
+        """Commit changes to the test branch."""
+        if not self.test_branch:
+            print("Not on a test branch. Cannot commit.", file=sys.stderr)
+            return False
+
+        add_result = self._run_git_command(['git', 'add', '.'])
+        if add_result.returncode != 0:
+            print(f"Failed to stage changes: {add_result.stderr}", file=sys.stderr)
+            return False
+
+        commit_result = self._run_git_command(['git', 'commit', '-m', message])
+        if commit_result.returncode != 0:
+            if "nothing to commit" in commit_result.stdout or "nothing to commit" in commit_result.stderr:
+                print("No changes to commit.")
+                return True
+            print(f"Failed to commit changes: {commit_result.stderr}", file=sys.stderr)
+            return False
+
+        print(f"Committed changes with message: '{message}'")
+        return True
+
+    def revert_changes(self) -> bool:
+        """Revert changes and go back to the original branch."""
+        if not self.original_branch:
+            print("No original branch recorded. Cannot revert.", file=sys.stderr)
+            return False
+
+        checkout_result = self._run_git_command(['git', 'checkout', self.original_branch])
+        if checkout_result.returncode != 0:
+            print(f"Failed to checkout original branch '{self.original_branch}': {checkout_result.stderr}", file=sys.stderr)
+            return False
+
+        if self.test_branch:
+            delete_branch_result = self._run_git_command(['git', 'branch', '-D', self.test_branch])
+            if delete_branch_result.returncode != 0:
+                print(f"Failed to delete test branch '{self.test_branch}': {delete_branch_result.stderr}", file=sys.stderr)
+        
+        print(f"Reverted changes and returned to branch '{self.original_branch}'")
+        self.test_branch = None
+        return True
 
     def _is_valid_path(self, path: Path) -> bool:
         """Check if a path should be included in the scan."""
@@ -215,8 +300,13 @@ def main():
     should_remove = '--remove' in sys.argv
     output_file = Path("decommission_findings.json")
 
+    tool = PostgreSQLDecommissionTool(repo_path, db_name, remove=should_remove)
+
     try:
-        tool = PostgreSQLDecommissionTool(repo_path, db_name, remove=should_remove)
+        if should_remove:
+            if not tool.create_test_branch():
+                sys.exit(1)
+
         findings = tool.scan_repository()
         
         summary, plan = generate_summary_and_plan(findings, db_name, should_remove)
@@ -233,7 +323,14 @@ def main():
             print("\n🚀 Starting file modification process...")
             tool.remove_references()
             print("\n✅ Database references removal process finished!")
-            print("Please review the changes.")
+            
+            commit_message = f"feat: Decommission {db_name}"
+            if tool.commit_changes(commit_message):
+                print(f"Changes committed to branch '{tool.test_branch}'. Please review and create a pull request.")
+            else:
+                print("Failed to commit changes. Reverting...", file=sys.stderr)
+                tool.revert_changes()
+
         else:
             print("\n💡 Run with --remove flag to actually modify files")
 
@@ -243,6 +340,9 @@ def main():
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}", file=sys.stderr)
+        if tool.test_branch:
+            print("Reverting changes due to error...", file=sys.stderr)
+            tool.revert_changes()
         sys.exit(1)
 
 if __name__ == "__main__":
