@@ -11,6 +11,7 @@ class PostgreSQLDecommissionTool:
         self.repo_path = Path(repo_path)
         self.db_name = db_name
         self.max_findings = max_findings
+        self.findings = {}
         self.constraints = {
             'yaml_extensions': ['.yaml', '.yml', '.tpl'],
             'config_extensions': ['.conf', '.env'],
@@ -53,6 +54,7 @@ class PostgreSQLDecommissionTool:
         for key in findings:
             findings[key] = findings[key][:self.max_findings]
         
+        self.findings = findings
         return findings
 
     def _is_valid_path(self, file_path: Path) -> bool:
@@ -143,6 +145,33 @@ class PostgreSQLDecommissionTool:
             print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
         return findings
 
+    def _comment_source_code_reference(self, finding: Dict) -> None:
+        """Comment out source code references"""
+        file_path = self.repo_path / finding['file']
+        line_num = finding.get('line', 0)
+        
+        comment_char = '#'
+        if file_path.suffix in ['.go', '.js', '.ts']:
+            comment_char = '//'
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            if 1 <= line_num <= len(lines):
+                original_line = lines[line_num - 1]
+                # Avoid double-commenting
+                if not original_line.strip().startswith((comment_char, '#')):
+                    lines[line_num - 1] = f"{comment_char} REMOVED: {original_line}"
+                    
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.writelines(lines)
+                    
+                    print(f"✅ Commented out source code in {file_path}:{line_num}")
+                    
+        except Exception as e:
+            print(f"❌ Failed to comment source code in {file_path}: {e}")
+
 def generate_summary_and_plan(findings: Dict[str, List], repo_path: str) -> Dict:
     """Generate a summary and print a removal plan."""
     total_refs = sum(len(refs) for refs in findings.values())
@@ -209,6 +238,10 @@ def generate_summary_and_plan(findings: Dict[str, List], repo_path: str) -> Dict
             # Remove template resources
             for finding in self.findings.get('template_resources', []):
                 self._comment_template_resource(finding) # Changed to comment out
+            
+            # Comment out source code references
+            for finding in self.findings.get('source_code_references', []):
+                self._comment_source_code_reference(finding)
             
             print("✅ File references cleaned up")
             return True

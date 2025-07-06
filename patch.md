@@ -1,545 +1,604 @@
-Looking at your updated codebase in the attachment, I can see your current `decommission_tool.py` is a **scanner-only implementation** that doesn't have the `--remove` functionality yet. Based on the search results and your request, here's the **complete enhanced solution** with E2E branch testing:
+Based on your updated codebase in the attachments, here are comprehensive unit tests for your `decommission_tool.py`:
 
-## **Enhanced Decommission Tool with File Modification**
+## **Enhanced Unit Tests for Updated Codebase**
 
-First, update your `decommission_tool.py` to include the missing `--remove` functionality:
+### **tests/test_decommission_tool.py**
 
 ```python
-import os
-import re
-import sys
+import pytest
+import tempfile
 import json
-import yaml
 from pathlib import Path
-from typing import List, Dict
+from unittest.mock import patch, mock_open
+from decommission_tool import PostgreSQLDecommissionTool, generate_summary_and_plan
 
-class PostgreSQLDecommissionTool:
-    def __init__(self, repo_path: str, db_name: str, max_findings: int = 100):
-        self.repo_path = Path(repo_path)
-        self.db_name = db_name
-        self.max_findings = max_findings
-        self.findings = {}
-        self.constraints = {
-            'yaml_extensions': ['.yaml', '.yml', '.tpl'],
-            'config_extensions': ['.conf', '.env'],
-            'source_extensions': ['.go', '.py', '.ts', '.js'],
-            'max_file_size': 10 * 1024 * 1024,  # 10MB limit
-            'exclude_dirs': ['.git', 'node_modules', '__pycache__', '.pytest_cache', 'vendor']
-        }
+@pytest.fixture
+def temp_repo(tmp_path: Path) -> Path:
+    """Create a comprehensive temporary repository structure for testing."""
+    repo_dir = tmp_path / "test-repo"
+    charts_dir = repo_dir / "charts"
+    templates_dir = charts_dir / "templates"
+    config_dir = repo_dir / "config"
+    src_dir = repo_dir / "src"
+    
+    # Create directory structure
+    templates_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True)
+    src_dir.mkdir(parents=True)
 
-    def scan_repository(self) -> Dict[str, List]:
-        """Scan for all PostgreSQL references with constraints"""
-        if not self.repo_path.is_dir():
-            raise FileNotFoundError(f"Repository path does not exist or is not a directory: {self.repo_path}")
+    # 1. Helm Chart with postgres dependency
+    (charts_dir / "Chart.yaml").write_text("""
+apiVersion: v2
+name: my-app
+version: 1.0.0
+dependencies:
+  - name: postgresql
+    version: "12.1.6"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+  - name: redis
+    version: "17.3.7"
+    repository: "https://charts.bitnami.com/bitnami"
+""")
 
-        all_files = [p for p in self.repo_path.rglob('*') if p.is_file() and self._is_valid_path(p)]
+    # 2. values.yaml with DB references
+    (charts_dir / "values.yaml").write_text("""
+replicaCount: 1
+postgresql:
+  enabled: true
+  postgresqlDatabase: my_test_db
+  postgresqlUsername: testuser
+database:
+  name: my_test_db
+  user: admin
+  POSTGRES_DB: my_test_db
+  DATABASE_URL: postgres://user:pass@localhost/my_test_db
+redis:
+  enabled: true
+""")
+
+    # 3. PVC manifest
+    (templates_dir / "pvc.yaml").write_text("""
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data-pvc
+  labels:
+    app: postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi
+""")
+
+    # 4. Template with PostgreSQL resources
+    (templates_dir / "postgres-deployment.yaml").write_text("""
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-primary
+spec:
+  serviceName: postgres
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:13
+        env:
+        - name: POSTGRES_DB
+          value: my_test_db
+""")
+
+    # 5. Config files
+    (config_dir / "database.conf").write_text("""
+# Database configuration
+POSTGRES_DB=my_test_db
+POSTGRES_USER=testuser
+PGPASSWORD=secret123
+""")
+
+    (config_dir / "app.env").write_text("""
+DATABASE_URL=postgres://user:pass@postgres:5432/my_test_db
+REDIS_URL=redis://redis:6379
+""")
+
+    # 6. Source code files with DSN
+    (src_dir / "main.go").write_text('''
+package main
+
+const dsn = "postgres://user:pass@host/my_test_db"
+const redisDSN = "redis://localhost:6379"
+''')
+
+    (src_dir / "config.py").write_text('''
+DATABASE_URL = "postgresql://user:pass@localhost:5432/my_test_db"
+REDIS_URL = "redis://localhost:6379"
+''')
+
+    # 7. Large file (should be excluded)
+    large_content = "x" * (11 * 1024 * 1024)  # 11MB
+    (repo_dir / "large_file.yaml").write_text(large_content)
+
+    # 8. Files in excluded directories
+    excluded_dir = repo_dir / "node_modules"
+    excluded_dir.mkdir()
+    (excluded_dir / "package.yaml").write_text("postgres: test")
+
+    return repo_dir
+
+class TestPostgreSQLDecommissionTool:
+    """Test suite for PostgreSQLDecommissionTool"""
+
+    def test_initialization(self, temp_repo):
+        """Test tool initialization with valid parameters"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        assert tool.repo_path == Path(temp_repo)
+        assert tool.db_name == "my_test_db"
+        assert tool.max_findings == 100
+        assert 'yaml_extensions' in tool.constraints
+
+    def test_initialization_invalid_path(self):
+        """Test tool initialization with invalid repository path"""
+        with pytest.raises(FileNotFoundError):
+            tool = PostgreSQLDecommissionTool("/nonexistent/path", "test_db")
+            tool.scan_repository()
+
+    def test_scan_helm_dependencies(self, temp_repo):
+        """Test scanning for Helm dependencies"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "postgresql")
+        findings = tool.scan_repository()
         
-        findings = {
+        helm_deps = findings['helm_dependencies']
+        assert len(helm_deps) == 1
+        assert helm_deps[0]['severity'] == 'high'
+        assert 'Chart.yaml' in helm_deps[0]['file']
+        assert helm_deps[0]['content']['name'] == 'postgresql'
+
+    def test_scan_config_references(self, temp_repo):
+        """Test scanning for configuration references"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        findings = tool.scan_repository()
+        
+        config_refs = findings['config_references']
+        assert len(config_refs) >= 3  # Should find multiple references
+        
+        # Check that we found references in different file types
+        file_types = {ref['file'].split('.')[-1] for ref in config_refs}
+        assert 'yaml' in file_types  # values.yaml
+        assert 'conf' in file_types  # database.conf
+        assert 'env' in file_types   # app.env
+
+    def test_scan_pvc_references(self, temp_repo):
+        """Test scanning for PVC references"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "any_db")
+        findings = tool.scan_repository()
+        
+        pvc_refs = findings['pvc_references']
+        assert len(pvc_refs) == 1  # Only postgres PVC should match
+        assert pvc_refs[0]['severity'] == 'critical'
+        assert 'postgres-data-pvc' in pvc_refs[0]['content']
+
+    def test_scan_template_resources(self, temp_repo):
+        """Test scanning for template resources"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        findings = tool.scan_repository()
+        
+        template_refs = findings['template_resources']
+        assert len(template_refs) >= 1
+        
+        # Should find the postgres deployment
+        postgres_template = next((t for t in template_refs if 'postgres-deployment' in t['file']), None)
+        assert postgres_template is not None
+        assert postgres_template['severity'] == 'high'
+
+    def test_scan_source_code_references(self, temp_repo):
+        """Test scanning for source code DSN references"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        findings = tool.scan_repository()
+        
+        source_refs = findings['source_code_references']
+        assert len(source_refs) >= 2  # Should find references in .go and .py files
+        
+        # Check file types
+        file_extensions = {ref['file'].split('.')[-1] for ref in source_refs}
+        assert 'go' in file_extensions
+        assert 'py' in file_extensions
+
+    def test_file_constraints_size_limit(self, temp_repo):
+        """Test that large files are excluded"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "test_db")
+        findings = tool.scan_repository()
+        
+        # Large file should not appear in any findings
+        all_files = []
+        for category in findings.values():
+            all_files.extend([f['file'] for f in category])
+        
+        assert not any('large_file.yaml' in f for f in all_files)
+
+    def test_file_constraints_excluded_directories(self, temp_repo):
+        """Test that excluded directories are ignored"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "postgres")
+        findings = tool.scan_repository()
+        
+        # Files in node_modules should not appear
+        all_files = []
+        for category in findings.values():
+            all_files.extend([f['file'] for f in category])
+        
+        assert not any('node_modules' in f for f in all_files)
+
+    def test_max_findings_constraint(self, temp_repo):
+        """Test that max findings constraint is applied"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db", max_findings=2)
+        findings = tool.scan_repository()
+        
+        # Each category should have at most 2 findings
+        for category, refs in findings.items():
+            assert len(refs) <= 2
+
+    def test_severity_assignment(self, temp_repo):
+        """Test that severity levels are correctly assigned"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        findings = tool.scan_repository()
+        
+        # Check severity levels
+        assert all(f['severity'] == 'critical' for f in findings['pvc_references'])
+        assert all(f['severity'] == 'high' for f in findings['helm_dependencies'])
+        assert all(f['severity'] == 'high' for f in findings['template_resources'])
+        assert all(f['severity'] == 'high' for f in findings['source_code_references'])
+        assert all(f['severity'] == 'medium' for f in findings['config_references'])
+
+    def test_relative_file_paths(self, temp_repo):
+        """Test that file paths are relative to repository root"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        findings = tool.scan_repository()
+        
+        all_files = []
+        for category in findings.values():
+            all_files.extend([f['file'] for f in category])
+        
+        # All paths should be relative (not start with /)
+        assert all(not f.startswith('/') for f in all_files)
+        # All paths should be relative to repo root
+        assert all(not f.startswith(str(temp_repo)) for f in all_files)
+
+    def test_yaml_error_handling(self, temp_repo):
+        """Test handling of invalid YAML files"""
+        # Create invalid YAML file
+        invalid_yaml = temp_repo / "invalid.yaml"
+        invalid_yaml.write_text("invalid: yaml: content: [")
+        
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "test_db")
+        # Should not raise exception, should handle gracefully
+        findings = tool.scan_repository()
+        assert isinstance(findings, dict)
+
+    def test_empty_yaml_handling(self, temp_repo):
+        """Test handling of empty YAML files"""
+        empty_yaml = temp_repo / "empty.yaml"
+        empty_yaml.write_text("")
+        
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "test_db")
+        findings = tool.scan_repository()
+        assert isinstance(findings, dict)
+
+    def test_multiple_yaml_documents(self, temp_repo):
+        """Test handling of YAML files with multiple documents"""
+        multi_doc = temp_repo / "multi-doc.yaml"
+        multi_doc.write_text("""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+""")
+        
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "postgres")
+        findings = tool.scan_repository()
+        
+        # Should find the PVC in the multi-document file
+        pvc_files = [f['file'] for f in findings['pvc_references']]
+        assert any('multi-doc.yaml' in f for f in pvc_files)
+
+class TestGenerateSummaryAndPlan:
+    """Test suite for generate_summary_and_plan function"""
+
+    def test_summary_generation(self, temp_repo, capsys):
+        """Test summary generation with various findings"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        findings = tool.scan_repository()
+        
+        summary = generate_summary_and_plan(findings, str(temp_repo))
+        
+        # Check summary structure
+        assert 'total_references' in summary
+        assert 'severity_breakdown' in summary
+        assert 'files_affected' in summary
+        
+        # Check that totals make sense
+        assert summary['total_references'] > 0
+        assert summary['files_affected'] > 0
+        
+        # Check output was printed
+        captured = capsys.readouterr()
+        assert "PostgreSQL Decommissioning Plan" in captured.out
+        assert "Total References Found" in captured.out
+
+    def test_severity_breakdown(self, temp_repo):
+        """Test severity breakdown calculation"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        findings = tool.scan_repository()
+        
+        summary = generate_summary_and_plan(findings, str(temp_repo))
+        severity_breakdown = summary['severity_breakdown']
+        
+        # Should have critical findings (PVCs)
+        assert severity_breakdown['critical'] > 0
+        # Should have high findings (Helm deps, templates, source code)
+        assert severity_breakdown['high'] > 0
+        # Should have medium findings (config refs)
+        assert severity_breakdown['medium'] > 0
+
+    def test_empty_findings(self, temp_repo, capsys):
+        """Test summary generation with no findings"""
+        # Use a database name that won't be found
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "nonexistent_db")
+        findings = tool.scan_repository()
+        
+        summary = generate_summary_and_plan(findings, str(temp_repo))
+        
+        assert summary['total_references'] == 0
+        assert summary['files_affected'] == 0
+        assert all(count == 0 for count in summary['severity_breakdown'].values())
+
+class TestMainFunction:
+    """Test suite for main function"""
+
+    @patch('sys.argv', ['decommission_tool.py', '/test/repo', 'test_db'])
+    @patch('decommission_tool.PostgreSQLDecommissionTool')
+    def test_main_function_success(self, mock_tool_class):
+        """Test main function with valid arguments"""
+        from decommission_tool import main
+        
+        # Mock the tool instance
+        mock_tool = mock_tool_class.return_value
+        mock_tool.scan_repository.return_value = {
             'helm_dependencies': [],
             'config_references': [],
             'template_resources': [],
             'pvc_references': [],
             'source_code_references': []
         }
-
-        for file_path in all_files:
-            if file_path.name == 'values.yaml' or file_path.suffix in self.constraints['config_extensions']:
-                findings['config_references'].extend(self._scan_config_file(file_path))
-            
-            if file_path.suffix in self.constraints['yaml_extensions']:
-                findings['helm_dependencies'].extend(self._scan_helm_chart(file_path))
-                findings['pvc_references'].extend(self._scan_pvc(file_path))
-                findings['template_resources'].extend(self._scan_template(file_path))
-            
-            if file_path.suffix in self.constraints['source_extensions']:
-                findings['source_code_references'].extend(self._scan_source_code(file_path))
         
-        # Apply max findings constraint to each category
-        for key in findings:
-            findings[key] = findings[key][:self.max_findings]
+        # Mock file writing
+        with patch('builtins.open', mock_open()):
+            with patch('json.dump'):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+                
+                # Should exit with 0 (no critical findings)
+                assert exc_info.value.code == 0
+
+    @patch('sys.argv', ['decommission_tool.py', '/test/repo', 'test_db'])
+    @patch('decommission_tool.PostgreSQLDecommissionTool')
+    def test_main_function_critical_findings(self, mock_tool_class):
+        """Test main function with critical findings"""
+        from decommission_tool import main
         
-        self.findings = findings
-        return findings
-
-    def _is_valid_path(self, file_path: Path) -> bool:
-        """Check if a file path is valid against constraints."""
-        if file_path.stat().st_size > self.constraints['max_file_size']:
-            return False
-        if any(excluded in file_path.parts for excluded in self.constraints['exclude_dirs']):
-            return False
-        return True
-
-    def _scan_helm_chart(self, file_path: Path) -> List[Dict]:
-        """Scan a single Chart.yaml or requirements.yaml file."""
-        findings = []
-        if file_path.name not in ['Chart.yaml', 'requirements.yaml']:
-            return findings
-            
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = yaml.safe_load(f)
-            if not content or 'dependencies' not in content:
-                return findings
-
-            for dep in content['dependencies']:
-                name = dep.get('name', '').lower()
-                if 'postgres' in name or self.db_name in name:
-                    findings.append({'file': str(file_path.relative_to(self.repo_path)), 'type': 'helm_dependency', 'content': dep, 'severity': 'high'})
-        except (yaml.YAMLError, IOError) as e:
-            print(f"Warning: Could not process {file_path}: {e}", file=sys.stderr)
-        return findings
-
-    def _scan_config_file(self, file_path: Path) -> List[Dict]:
-        """Scan config files like values.yaml, .env, .conf."""
-        findings = []
-        patterns = [rf'\b{self.db_name}\b', r'POSTGRES_DB', r'POSTGRES_USER', r'PGPASSWORD', r'DATABASE_URL']
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                for i, line in enumerate(f, 1):
-                    if any(re.search(p, line, re.IGNORECASE) for p in patterns):
-                        findings.append({'file': str(file_path.relative_to(self.repo_path)), 'line': i, 'type': 'config_reference', 'content': line.strip()[:200], 'severity': 'medium'})
-        except IOError as e:
-            print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
-        return findings
-    
-    def _scan_template(self, file_path: Path) -> List[Dict]:
-        """Scan a generic Kubernetes YAML/template file for resource references."""
-        findings = []
-        patterns = [r'image:.*postgres', r'kind:\s*(StatefulSet|Deployment)', rf'\b{self.db_name}\b']
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            if any(re.search(p, content, re.IGNORECASE) for p in patterns):
-                findings.append({'file': str(file_path.relative_to(self.repo_path)), 'type': 'template_resource', 'content': 'Potential PostgreSQL resource definition', 'severity': 'high'})
-        except IOError as e:
-            print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
-        return findings
-
-    def _scan_pvc(self, file_path: Path) -> List[Dict]:
-        """Scan a YAML file specifically for PersistentVolumeClaims related to PostgreSQL."""
-        findings = []
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                docs = yaml.safe_load_all(f)
-                for doc in docs:
-                    if not isinstance(doc, dict) or doc.get('kind') != 'PersistentVolumeClaim':
-                        continue
+        # Mock the tool instance with critical findings
+        mock_tool = mock_tool_class.return_value
+        mock_tool.scan_repository.return_value = {
+            'helm_dependencies': [],
+            'config_references': [],
+            'template_resources': [],
+            'pvc_references': [{'severity': 'critical'}],
+            'source_code_references': []
+        }
+        
+        with patch('builtins.open', mock_open()):
+            with patch('json.dump'):
+                with patch('decommission_tool.generate_summary_and_plan') as mock_summary:
+                    mock_summary.return_value = {
+                        'total_references': 1,
+                        'severity_breakdown': {'critical': 1, 'high': 0, 'medium': 0, 'low': 0},
+                        'files_affected': 1
+                    }
                     
-                    name = doc.get('metadata', {}).get('name', '').lower()
-                    labels = doc.get('metadata', {}).get('labels', {})
-                    if 'postgres' in name or self.db_name in name or 'postgres' in str(labels):
-                        findings.append({'file': str(file_path.relative_to(self.repo_path)), 'type': 'pvc_reference', 'content': f"PVC found: {name}", 'severity': 'critical'})
-        except (yaml.YAMLError, IOError) as e:
-            print(f"Warning: Could not process {file_path} for PVCs: {e}", file=sys.stderr)
-        return findings
-
-    def _scan_source_code(self, file_path: Path) -> List[Dict]:
-        """Scan source code files for hardcoded DSNs."""
-        findings = []
-        dsn_pattern = r'postgres(ql)?:\/\/[^\s"]+'
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                for i, line in enumerate(f, 1):
-                    if re.search(dsn_pattern, line, re.IGNORECASE):
-                        findings.append({'file': str(file_path.relative_to(self.repo_path)), 'line': i, 'type': 'source_code_reference', 'content': line.strip()[:200], 'severity': 'high'})
-        except IOError as e:
-            print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
-        return findings
-
-    def remove_file_references(self) -> bool:
-        """Remove file references found by the scanner"""
-        try:
-            print("🧹 Removing file references...")
-            
-            # Remove Helm dependencies
-            for finding in self.findings.get('helm_dependencies', []):
-                self._remove_helm_dependency(finding)
-            
-            # Comment out config references
-            for finding in self.findings.get('config_references', []):
-                self._comment_config_reference(finding)
-            
-            # Remove template resources
-            for finding in self.findings.get('template_resources', []):
-                self._remove_template_resource(finding)
-            
-            print("✅ File references cleaned up")
-            return True
-            
-        except Exception as e:
-            print(f"❌ File cleanup failed: {e}")
-            return False
-
-    def _remove_helm_dependency(self, finding: Dict) -> None:
-        """Remove Helm dependency from Chart.yaml"""
-        file_path = self.repo_path / finding['file']
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = yaml.safe_load(f)
-            
-            if 'dependencies' in content:
-                original_deps = content['dependencies']
-                content['dependencies'] = [
-                    dep for dep in original_deps
-                    if not ('postgres' in dep.get('name', '').lower() or 
-                           self.db_name in dep.get('name', ''))
-                ]
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    yaml.dump(content, f, default_flow_style=False)
-                
-                print(f"✅ Removed PostgreSQL dependency from {file_path}")
-                
-        except Exception as e:
-            print(f"❌ Failed to remove dependency from {file_path}: {e}")
-
-    def _comment_config_reference(self, finding: Dict) -> None:
-        """Comment out config references"""
-        file_path = self.repo_path / finding['file']
-        line_num = finding.get('line', 0)
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            if 1 <= line_num <= len(lines):
-                original_line = lines[line_num - 1]
-                if not original_line.strip().startswith('#'):
-                    lines[line_num - 1] = f"# REMOVED: {original_line}"
+                    with pytest.raises(SystemExit) as exc_info:
+                        main()
                     
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.writelines(lines)
-                    
-                    print(f"✅ Commented out config in {file_path}:{line_num}")
-                    
-        except Exception as e:
-            print(f"❌ Failed to comment config in {file_path}: {e}")
+                    # Should exit with 2 (critical findings)
+                    assert exc_info.value.code == 2
 
-    def _remove_template_resource(self, finding: Dict) -> None:
-        """Remove or comment out template resources"""
-        file_path = self.repo_path / finding['file']
+    @patch('sys.argv', ['decommission_tool.py'])
+    def test_main_function_insufficient_args(self):
+        """Test main function with insufficient arguments"""
+        from decommission_tool import main
         
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            if not content.startswith('# REMOVED'):
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(f"# REMOVED: PostgreSQL template for {self.db_name}\n")
-                    f.write(f"# Original content commented out\n")
-                    for line in content.splitlines():
-                        f.write(f"# {line}\n")
-                
-                print(f"✅ Commented out template {file_path}")
-                
-        except Exception as e:
-            print(f"❌ Failed to remove template {file_path}: {e}")
-
-def generate_summary_and_plan(findings: Dict[str, List], repo_path: str) -> Dict:
-    """Generate a summary and print a removal plan."""
-    total_refs = sum(len(refs) for refs in findings.values())
-    severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
-    files_affected = set()
-
-    for category, find_list in findings.items():
-        for finding in find_list:
-            severity = finding.get('severity', 'low')
-            severity_counts[severity] += 1
-            files_affected.add(finding['file'])
-    
-    summary = {
-        'total_references': total_refs,
-        'severity_breakdown': severity_counts,
-        'files_affected': len(files_affected)
-    }
-
-    print("--- PostgreSQL Decommissioning Plan ---")
-    print(f"Target Repository: {repo_path}")
-    print(f"Total References Found: {summary['total_references']}")
-    print(f"Unique Files Affected: {summary['files_affected']}")
-    print("\n**Severity Breakdown:**")
-    for severity, count in summary['severity_breakdown'].items():
-        if count > 0:
-            print(f"- {severity.upper()}: {count}")
-
-    if findings['pvc_references']:
-        print("\n**Step 1: Handle Persistent Volumes (CRITICAL)**")
-        print("- ⚠️  BACKUP DATA BEFORE PROCEEDING. Review PVC retention policies.")
-        for item in findings['pvc_references'][:5]:
-            print(f"- Review PVC in: {item['file']} ({item['content']})")
-
-    if findings['helm_dependencies'] or findings['template_resources'] or findings['source_code_references']:
-        print("\n**Step 2: Remove High-Severity References (HIGH)**")
-        for item in findings['helm_dependencies'][:5]:
-            print(f"- Remove Helm dependency from: {item['file']}")
-        for item in findings['template_resources'][:5]:
-            print(f"- Review template resource in: {item['file']}")
-        for item in findings['source_code_references'][:5]:
-            print(f"- Remove hardcoded DSN from: {item['file']}:{item['line']}")
-
-    if findings['config_references']:
-        print("\n**Step 3: Clean Configuration (MEDIUM)**")
-        for item in findings['config_references'][:5]:
-            print(f"- Update config in: {item['file']}:{item['line']}")
-    
-    print("--- End of Plan ---")
-    return summary
-
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: python decommission_tool.py <repo_path> <db_name> [--remove]", file=sys.stderr)
-        sys.exit(1)
+        with pytest.raises(SystemExit) as exc_info:
+            main()
         
-    repo_path = sys.argv[1]
-    db_name = sys.argv[2]
-    should_remove = '--remove' in sys.argv
-    output_file = Path("decommission_findings.json")
+        # Should exit with 1 (error)
+        assert exc_info.value.code == 1
 
-    try:
-        tool = PostgreSQLDecommissionTool(repo_path, db_name)
+class TestEdgeCases:
+    """Test edge cases and error conditions"""
+
+    def test_binary_file_handling(self, temp_repo):
+        """Test that binary files are handled gracefully"""
+        # Create a binary file
+        binary_file = temp_repo / "binary.png"
+        binary_file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')
+        
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "test_db")
+        # Should not crash on binary files
         findings = tool.scan_repository()
-        summary = generate_summary_and_plan(findings, repo_path)
+        assert isinstance(findings, dict)
+
+    def test_unicode_content(self, temp_repo):
+        """Test handling of files with unicode content"""
+        unicode_file = temp_repo / "unicode.yaml"
+        unicode_file.write_text("name: test_db_ñáéíóú", encoding='utf-8')
         
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump({'summary': summary, 'findings': findings}, f, indent=2)
-        
-        print(f"\n📄 Detailed findings exported to: {output_file}")
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "test_db")
+        findings = tool.scan_repository()
+        assert isinstance(findings, dict)
 
-        # If --remove flag is provided, actually remove the references
-        if should_remove:
-            print("\n🚀 Starting file modification process...")
+    def test_symlink_handling(self, temp_repo):
+        """Test handling of symbolic links"""
+        if hasattr(temp_repo, 'symlink_to'):  # Python 3.10+
+            target = temp_repo / "target.yaml"
+            target.write_text("postgres: test")
             
-            # Remove file references
-            if not tool.remove_file_references():
-                print("❌ File cleanup failed")
-                sys.exit(1)
-            
-            print("\n✅ Database references removed from source files!")
-            print("Pipeline can now redeploy without the database.")
-        else:
-            print("\n💡 Run with --remove flag to actually modify files")
-
-        # Exit with non-zero status if critical issues are found for CI
-        if summary['severity_breakdown']['critical'] > 0:
-            print("\n❌ Critical findings detected. Exiting with error code.", file=sys.stderr)
-            sys.exit(2)
-
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}", file=sys.stderr)
-        sys.exit(1)
+            symlink = temp_repo / "link.yaml"
+            try:
+                symlink.symlink_to(target)
+                
+                tool = PostgreSQLDecommissionTool(str(temp_repo), "postgres")
+                findings = tool.scan_repository()
+                assert isinstance(findings, dict)
+            except OSError:
+                # Skip if symlinks not supported
+                pass
 
 if __name__ == "__main__":
-    main()
+    pytest.main([__file__, "-v"])
 ```
 
-## **Enhanced E2E Test with Branch Management**
+### **Additional Test Configuration Files**
 
-Create a new file `test_e2e_branch.py`:
+#### **tests/conftest.py**
 
 ```python
-import subprocess
-import sys
-import os
-import shutil
+import pytest
+import tempfile
 from pathlib import Path
 
-def run_command(cmd, cwd=None):
-    """Run command and return result"""
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd)
-    return result
+@pytest.fixture(scope="session")
+def test_data_dir():
+    """Provide a directory for test data files"""
+    return Path(__file__).parent / "test_data"
 
-def test_e2e_with_branch():
-    """E2E test with branch creation, modification, verification, and cleanup"""
+@pytest.fixture
+def mock_repo_minimal(tmp_path):
+    """Create a minimal repository for quick tests"""
+    repo_dir = tmp_path / "minimal-repo"
+    repo_dir.mkdir()
     
-    # Test configuration
-    repo_url = 'https://github.com/cloudnative-pg/cloudnative-pg.git'
-    clone_dir = './cloudnative-pg'
-    db_name = 'test_db'
-    branch_name = f'chore/{db_name}-decomission'
+    # Just a simple Chart.yaml
+    (repo_dir / "Chart.yaml").write_text("""
+apiVersion: v2
+name: test-app
+dependencies:
+  - name: postgresql
+    version: "12.1.6"
+""")
     
-    print("🚀 Starting E2E test with branch management...")
-    
-    try:
-        # Step 1: Clean up any existing clone
-        if os.path.exists(clone_dir):
-            print("🧹 Cleaning up existing clone...")
-            shutil.rmtree(clone_dir)
-        
-        # Step 2: Clone the repository
-        print("📥 Cloning repository...")
-        result = run_command(f'git clone --depth 1 {repo_url} {clone_dir}')
-        if result.returncode != 0:
-            print(f"❌ Failed to clone repo: {result.stderr}")
-            return False
-        
-        # Step 3: Create and checkout new branch
-        print(f"🌿 Creating branch: {branch_name}")
-        result = run_command(f'git checkout -b {branch_name}', cwd=clone_dir)
-        if result.returncode != 0:
-            print(f"❌ Failed to create branch: {result.stderr}")
-            return False
-        
-        # Step 4: Run initial scan to see what we find
-        print("🔍 Running initial scan...")
-        result = run_command(f'python ../decommission_tool.py {clone_dir} {db_name}')
-        if result.returncode != 0:
-            print(f"❌ Initial scan failed: {result.stderr}")
-            return False
-        
-        initial_findings = result.stdout
-        print("Initial scan results:")
-        print(initial_findings)
-        
-        # Step 5: Run decommission tool with --remove flag
-        print(f"🗑️  Running decommission tool with --remove on branch {branch_name}...")
-        result = run_command(f'python ../decommission_tool.py {clone_dir} {db_name} --remove')
-        
-        removal_output = result.stdout
-        print("Removal process output:")
-        print(removal_output)
-        
-        # Step 6: Verify removal by rescanning
-        print("✅ Verifying removal by rescanning...")
-        result = run_command(f'python ../decommission_tool.py {clone_dir} {db_name}')
-        if result.returncode != 0:
-            print(f"❌ Verification scan failed: {result.stderr}")
-            return False
-        
-        verification_output = result.stdout
-        print("Verification scan results:")
-        print(verification_output)
-        
-        # Step 7: Check git status to see what files were modified
-        print("📋 Checking git status for modified files...")
-        result = run_command('git status --porcelain', cwd=clone_dir)
-        modified_files = result.stdout
-        if modified_files:
-            print("Modified files:")
-            print(modified_files)
-        else:
-            print("No files were modified")
-        
-        # Step 8: Show git diff for modified files
-        if modified_files:
-            print("📝 Showing git diff...")
-            result = run_command('git diff', cwd=clone_dir)
-            print("Git diff:")
-            print(result.stdout[:2000])  # Limit output
-        
-        # Step 9: Switch back to main branch
-        print("🔄 Switching back to main branch...")
-        result = run_command('git checkout main', cwd=clone_dir)
-        if result.returncode != 0:
-            print(f"❌ Failed to switch to main: {result.stderr}")
-            return False
-        
-        # Step 10: Delete the test branch
-        print(f"🗑️  Deleting test branch: {branch_name}")
-        result = run_command(f'git branch -D {branch_name}', cwd=clone_dir)
-        if result.returncode != 0:
-            print(f"❌ Failed to delete branch: {result.stderr}")
-            return False
-        
-        # Step 11: Final cleanup
-        print("🧹 Final cleanup...")
-        shutil.rmtree(clone_dir)
-        
-        print("✅ E2E test with branch management completed successfully!")
-        return True
-        
-    except Exception as e:
-        print(f"❌ E2E test failed with exception: {e}")
-        return False
-
-if __name__ == "__main__":
-    success = test_e2e_with_branch()
-    sys.exit(0 if success else 1)
+    return repo_dir
 ```
 
-## **Updated Makefile with E2E Branch Testing**
+#### **tests/test_integration.py**
 
-Add these targets to your existing `Makefile`:
+```python
+import pytest
+import json
+from pathlib import Path
+from decommission_tool import PostgreSQLDecommissionTool
+
+class TestIntegration:
+    """Integration tests for the complete workflow"""
+
+    def test_full_workflow(self, temp_repo):
+        """Test the complete scanning workflow"""
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        
+        # Step 1: Scan repository
+        findings = tool.scan_repository()
+        
+        # Step 2: Verify all categories have findings
+        assert len(findings['helm_dependencies']) > 0
+        assert len(findings['config_references']) > 0
+        assert len(findings['template_resources']) > 0
+        assert len(findings['pvc_references']) > 0
+        assert len(findings['source_code_references']) > 0
+        
+        # Step 3: Verify JSON serialization works
+        json_str = json.dumps(findings)
+        parsed_findings = json.loads(json_str)
+        assert parsed_findings == findings
+
+    def test_real_world_scenario(self, temp_repo):
+        """Test with a realistic PostgreSQL deployment scenario"""
+        # This test uses the comprehensive temp_repo fixture
+        # which simulates a real Helm chart with PostgreSQL
+        
+        tool = PostgreSQLDecommissionTool(str(temp_repo), "my_test_db")
+        findings = tool.scan_repository()
+        
+        # Verify we found the expected types of references
+        assert any('Chart.yaml' in f['file'] for f in findings['helm_dependencies'])
+        assert any('values.yaml' in f['file'] for f in findings['config_references'])
+        assert any('pvc.yaml' in f['file'] for f in findings['pvc_references'])
+        assert any('.go' in f['file'] for f in findings['source_code_references'])
+        assert any('.py' in f['file'] for f in findings['source_code_references'])
+```
+
+## **Running the Tests**
+
+Add these commands to your `Makefile`:
 
 ```makefile
-# E2E test with branch management
-e2e-branch:
-	@echo "🧪 Running E2E test with branch management..."
-	@$(PYTHON) test_e2e_branch.py
+# Run all tests with coverage
+test-coverage:
+	@echo "🧪 Running tests with coverage..."
+	@$(PYTHON) -m pytest tests/ -v --cov=decommission_tool --cov-report=html --cov-report=term
 
-# Remove database references from source files
-remove-db-refs:
-	@echo "🗑️  Removing database references from source files..."
-	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME) --remove
+# Run specific test categories
+test-unit:
+	@echo "🧪 Running unit tests..."
+	@$(PYTHON) -m pytest tests/test_decommission_tool.py -v
 
-# Safe removal with branch creation
-remove-db-safe: setup-target
-	@echo "🌿 Creating branch for safe removal..."
-	@cd $(TARGET_REPO_DIR) && git checkout -b chore/$(DB_NAME)-decomission
-	@echo "🗑️  Removing database references..."
-	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME) --remove
-	@echo "✅ Verification scan..."
-	@$(PYTHON) decommission_tool.py $(TARGET_REPO_DIR) $(DB_NAME)
-	@echo "🔄 Switching back to main..."
-	@cd $(TARGET_REPO_DIR) && git checkout main
-	@echo "🗑️  Deleting test branch..."
-	@cd $(TARGET_REPO_DIR) && git branch -D chore/$(DB_NAME)-decomission
+test-integration:
+	@echo "🧪 Running integration tests..."
+	@$(PYTHON) -m pytest tests/test_integration.py -v
 
-# Complete CI with branch testing
-ci-with-branch: install lint test e2e-branch
-	@echo "✅ CI pipeline with branch testing completed successfully"
+# Run tests with detailed output
+test-verbose:
+	@echo "🧪 Running tests with verbose output..."
+	@$(PYTHON) -m pytest tests/ -v -s --tb=long
 ```
 
-## **Usage Examples**
+These comprehensive unit tests cover:
 
-```bash
-# Run E2E test with branch management
-make e2e-branch
+- **All scanning methods** for different file types
+- **Constraint validation** (file size, excluded directories)
+- **Error handling** for invalid YAML, binary files, unicode content
+- **Edge cases** like empty files, symlinks, multi-document YAML
+- **Integration scenarios** with realistic repository structures
+- **Main function testing** with different exit conditions
+- **Summary generation** and output formatting
 
-# Safe removal with automatic branch management
-make remove-db-safe DB_NAME=my_test_db
-
-# Complete CI pipeline with branch testing
-make ci-with-branch
-
-# Manual branch-based removal
-make setup-target
-cd ./cloudnative-pg && git checkout -b chore/my_db-decomission
-python decommission_tool.py ./cloudnative-pg my_db --remove
-python decommission_tool.py ./cloudnative-pg my_db  # Verify
-cd ./cloudnative-pg && git checkout main && git branch -D chore/my_db-decomission
-```
-
-This enhanced solution provides:
-
-1. **Branch Creation**: Creates `chore/{db_name}-decomission` branch before modifications
-2. **File Modification**: Actually removes/comments out PostgreSQL references
-3. **Verification**: Rescans to confirm removal worked
-4. **Clean Cleanup**: Switches back to main and deletes test branch
-5. **Git Integration**: Shows what files were modified and their diffs
-6. **Safety**: All changes are isolated to the test branch
-
-The E2E test now follows the complete GitOps workflow for database decommissioning with proper branch management.
+The tests ensure your decommissioning tool is robust and handles real-world scenarios effectively.
 
 Citations:
-[1] [repomix-output.xml](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/8768170/d1af88b4-8f13-49c1-b2d1-cb1e9d369be9/repomix-output.xml)  
-[2] [Python way to clone a git repository - Stack Overflow](https://stackoverflow.com/questions/2472552/python-way-to-clone-a-git-repository)  
-[3] [Clone git repo using GitPython - GitHub Gist](https://gist.github.com/plembo/a786ce2851cec61ac3a051fcaf3ccdab)  
-[4] [Cloning a repository - GitHub Docs](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository)  
-[5] [Python script for cloning repositories - DEV Community](https://dev.to/nisevi/script-for-cloning-repositories-4h4m)  
-[6] [Python code for GitHub repositories cloning automation | Python Script | GIT API usage in python](https://www.youtube.com/watch?v=MDtgwwAuQEw)  
-[7] [Cloning a git repo in python](https://www.youtube.com/watch?v=gu0tZJfq75o)  
-[8] [How to clone github respository with python?](https://stackoverflow.com/questions/59113664/how-to-clone-github-respository-with-python)  
-[9] [How to git clone all of your repositories at once with a simple python ...](https://www.reddit.com/r/github/comments/10p65j5/how_to_git_clone_all_of_your_repositories_at_once/)  
-[10] [How to manage git repositories with Python](https://linuxconfig.org/how-to-manage-git-repositories-with-python)  
-[11] [GitPython Tutorial — GitPython 3.1.44 documentation](https://gitpython.readthedocs.io/en/stable/tutorial.html)  
-[12] [Pytest best practice to setup and teardown before and after all tests](https://stackoverflow.com/questions/76608690/pytest-best-practice-to-setup-and-teardown-before-and-after-all-tests)  
-[13] [Branching With Git And Testing With Pytest: A Comprehensive Guide](https://jjmojojjmojo.github.io/branching-git-with-pytest.html)  
-[14] [Branch for testing then delete? : r/git - Reddit](https://www.reddit.com/r/git/comments/1id3p12/branch_for_testing_then_delete/)  
-[15] [Pytest Plugin List](https://docs.pytest.org/en/stable/reference/plugin_list.html)  
-[16] [Research Software Engineering with Python](https://alan-turing-institute.github.io/rse-course/html/module04_version_control_with_git/04_07_branches.html)  
-[17] [How to Delete Local and Remote Git Branches | Refine](https://refine.dev/blog/git-delete-remote-branch-and-local-branch/)  
-[18] [Git Branch Explained: How to Delete, Checkout, Create, and Rename a branch in Git](https://www.freecodecamp.org/news/git-branch-explained-how-to-delete-checkout-create-and-rename-a-branch-in-git/)  
-[19] [Branching With Git And Testing With Pytest: A Comprehensive Guide](https://jjmojojjmojo.github.io/branching-git-with-pytest-2.html)  
-[20] [seleniumbase/SeleniumBase: Python APIs for web ... - GitHub](https://github.com/seleniumbase/SeleniumBase)  
-[21] [Testing - Visual Studio Code](https://code.visualstudio.com/docs/debugtest/testing)
+[1] [repomix-output.xml](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/8768170/d1af88b4-8f13-49c1-b2d1-cb1e9d369be9/repomix-output.xml)
