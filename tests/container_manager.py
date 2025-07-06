@@ -1,21 +1,40 @@
+# tests/container_manager.py
+"""
+Async container manager for E2E testing.
+"""
 import asyncio
 import subprocess
-import time
 import logging
-import pytest
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Optional
+from typing import Dict, Any
+
+try:
+    import uvloop
+    UVLOOP_AVAILABLE = True
+except ImportError:
+    UVLOOP_AVAILABLE = False
+    logging.warning("uvloop not available, falling back to default asyncio event loop")
 
 logger = logging.getLogger(__name__)
 
 class AsyncContainerManager:
-    """Async container lifecycle management for E2E tests."""
+    """High-performance async container lifecycle management."""
     
-    def __init__(self, compose_file: Path, service_name: str = "mcp-server"):
+    def __init__(
+        self, 
+        compose_file: Path, 
+        service_name: str = "mcp-server",
+        use_uvloop: bool = True
+    ):
         self.compose_file = compose_file
         self.service_name = service_name
         self.container_name = f"helmconfoigdecomission_{service_name}_1"
         self._is_running = False
+        self.use_uvloop = use_uvloop and UVLOOP_AVAILABLE
+        
+        if self.use_uvloop:
+            logger.info("🚀 Using uvloop for enhanced performance")
 
     async def __aenter__(self):
         await self.start()
@@ -32,7 +51,8 @@ class AsyncContainerManager:
                 "podman-compose", "-f", str(self.compose_file),
                 "up", "--build", "-d",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                limit=1024 * 1024  # 1MB buffer limit
             )
             stdout, stderr = await process.communicate()
             
@@ -74,7 +94,8 @@ class AsyncContainerManager:
                     "podman", "ps", "--filter", f"name={self.container_name}",
                     "--format", "{{.Names}}",
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stderr=asyncio.subprocess.PIPE,
+                    limit=1024 * 64  # Smaller buffer for quick checks
                 )
                 stdout, stderr = await process.communicate()
                 
@@ -83,28 +104,28 @@ class AsyncContainerManager:
                         await self.execute(["python", "--version"])
                         return
                     except RuntimeError:
-                        # Container exists but not ready, continue waiting
                         pass
                     
             except Exception:
-                # Any subprocess error, continue waiting
                 pass
             
             await asyncio.sleep(1)
             
-        raise TimeoutError(f"Container {self.container_name} failed to become ready within {timeout}s")
+        raise TimeoutError(f"Container failed to become ready within {timeout}s")
 
     async def execute(self, command: List[str]) -> str:
-        """Execute command in container asynchronously."""
+        """Execute command with uvloop optimization."""
         if not self._is_running:
             raise RuntimeError("Container is not running")
         
         full_command = ["podman", "exec", self.container_name] + command
+        
         try:
             process = await asyncio.create_subprocess_exec(
                 *full_command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                limit=1024 * 1024  # 1MB buffer for command output
             )
             stdout, stderr = await process.communicate()
             
@@ -137,7 +158,7 @@ class AsyncE2ETestSuite:
             "duration": 0
         }
         
-        start_time = asyncio.get_event_loop().time()  # ✅ Non-blocking time
+        start_time = asyncio.get_event_loop().time()
         
         try:
             async with AsyncContainerManager(self.compose_file) as container:

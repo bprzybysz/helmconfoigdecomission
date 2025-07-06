@@ -28,16 +28,21 @@ dependencies = [
     # Core dependencies with version constraints
     "pyyaml>=6.0.1,<7.0.0",
     "requests>=2.31.0,<3.0.0",
-    # Add other core dependencies here
+    # MCP dependencies
+    "mcp>=1.0.0,<2.0.0",
+    "fastmcp>=0.1.0,<1.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    # Testing
+    # Testing with async support
     "pytest>=7.4.0,<9.0.0",
     "pytest-mock>=3.11.1,<4.0.0",
     "pytest-cov>=4.1.0,<6.0.0",
-    "pytest-asyncio>=0.21.0,<1.0.0",
+    "pytest-asyncio>=0.21.0,<1.0.0",  # ✅ Added for async tests
+    
+    # Performance enhancement
+    "uvloop>=0.17.0,<1.0.0; python_version >= '3.11'",  # ✅ Added for async performance
     
     # Code quality
     "mypy>=1.5.0,<2.0.0",
@@ -58,12 +63,28 @@ decommission-tool = "decommission_tool:main"
 "Repository" = "https://github.com/yourusername/decommission-tool"
 
 [tool.setuptools]
-py-modules = ["decommission_tool", "git_utils", "file_system_mcp_server"]
+py-modules = ["decommission_tool", "git_utils", "file_system_mcp_server", "mcp_server_main"]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["*"]
 exclude = ["tests*", "docs*", ".git*"]
+
+# ✅ CRITICAL: pytest-asyncio configuration
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --strict-markers --strict-config"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"  # ✅ Enable automatic async test detection
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "e2e: marks tests as end-to-end tests",
+    "asyncio: marks tests as asyncio tests",  # ✅ Add asyncio marker
+]
 
 # Code quality configuration
 [tool.black]
@@ -73,10 +94,10 @@ include = '\.pyi?$'
 extend-exclude = '''
 /(
     \.git
-  | \.pytest_cache
-  | \.mypy_cache
-  | build
-  | dist
+    | \.pytest_cache
+    | \.mypy_cache
+    | build
+    | dist
 )/
 '''
 
@@ -84,19 +105,19 @@ extend-exclude = '''
 target-version = "py311"
 line-length = 88
 select = [
-    "E",   # pycodestyle errors
-    "F",   # pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
-    "UP",  # pyupgrade
-    "N",   # pep8-naming
-    "RUF", # Ruff-specific rules
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "RUF",  # Ruff-specific rules
 ]
 ignore = [
-    "E501",      # line too long - handled by black
-    "B008",      # do not perform function calls in argument defaults
-    "RUF012",    # mutable class attributes should be annotated
+    "E501",   # line too long - handled by black
+    "B008",   # do not perform function calls in argument defaults
+    "RUF012", # mutable class attributes should be annotated
 ]
 
 [tool.ruff.isort]
@@ -117,19 +138,6 @@ warn_no_return = true
 warn_unreachable = true
 strict_equality = true
 show_error_codes = true
-
-[tool.pytest.ini_options]
-minversion = "7.0"
-addopts = "-ra -q --strict-markers --strict-config"
-testpaths = ["tests"]
-python_files = ["test_*.py", "*_test.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "integration: marks tests as integration tests",
-    "e2e: marks tests as end-to-end tests",
-]
 
 [tool.coverage.run]
 source = ["decommission_tool", "git_utils", "file_system_mcp_server"]

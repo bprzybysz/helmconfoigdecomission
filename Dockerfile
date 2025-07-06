@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git \
         curl \
         ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+        && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN groupadd --gid 1000 app && \
@@ -36,15 +36,15 @@ WORKDIR /app
 COPY --chown=app:app pyproject.toml ./
 COPY --chown=app:app . .
 
-# Install Python dependencies
+# ✅ Install with setuptools instead of Poetry
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip setuptools wheel && \
-    python -m pip install .
+    python -m pip install -e ".[dev]"
 
 # Switch to non-root user
 USER app
 
-# Health check for container readiness (simple process check)
+# Health check for container readiness
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import decommission_tool; print('OK')" || exit 1
 
