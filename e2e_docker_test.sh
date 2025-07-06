@@ -31,10 +31,60 @@ if [ $? -ne 0 ]; then
 fi
 echo -e "${GREEN}Docker containers started successfully.${NC}"
 
+# Cleanup function
+cleanup() {
+    echo -e "${GREEN}Cleaning up containers...${NC}"
+    podman-compose down -v --remove-orphans
+    podman container prune -f
+}
+
 # Ensure cleanup on exit
-trap "echo -e \"${GREEN}Cleaning up containers...${NC}"; podman-compose down -v --remove-orphans; podman container prune -f" EXIT
+trap cleanup EXIT
 
 echo -e "${GREEN}Container setup complete. You can now interact with the MCP server.${NC}"
 
-# Optional: Add commands here to interact with the running container if needed for manual verification
+# Give the MCP server some time to start up
+echo -e "${GREEN}Waiting for MCP server to start (10 seconds)...${NC}"
+sleep 10
+
+# Get the MCP server container ID
+CONTAINER_ID=$(podman ps -aqf "name=helmconfoigdecomission_mcp-server_1")
+
+if [ -z "$CONTAINER_ID" ]; then
+    echo -e "${RED}Error: MCP server container ID not found!${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}MCP Server Container ID: ${CONTAINER_ID}${NC}"
+
+# Check if container is running
+if [ "$(podman inspect -f '{{.State.Running}}' "$CONTAINER_ID")" != "true" ]; then
+    echo -e "${RED}Error: MCP server container is not running!${NC}"
+    exit 1
+fi
+
+# Run a test command inside the container
+echo -e "${GREEN}Running a test command inside the container (ls -l /app)...${NC}"
+podman exec "$CONTAINER_ID" ls -l /app
+
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Test command inside container failed!${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Test command inside container succeeded.${NC}"
+
+# Clone cloudnative-pg repository inside the container
+REPO_DIR="/app/cloudnative-pg"
+
+echo -e "${GREEN}Cloning cloudnative-pg/cloudnative-pg into ${REPO_DIR} inside the container...${NC}"
+podman exec "$CONTAINER_ID" git clone https://github.com/cloudnative-pg/cloudnative-pg.git "$REPO_DIR"
+
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Failed to clone cloudnative-pg repository!${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Repository cloned successfully.${NC}"
+
 echo -e "${GREEN}E2E test completed successfully!${NC}"

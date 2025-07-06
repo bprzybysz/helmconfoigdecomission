@@ -1,6 +1,12 @@
+import logging
+import os
 from mcp.server.fastmcp import FastMCP
 from file_system_mcp_server import FileSystemMCPServer
 from typing import List, Dict, Any, Optional
+
+# Configure logging
+log_level = os.getenv("MCP_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, log_level), format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 mcp = FastMCP("File System MCP Server")
 file_system_server = FileSystemMCPServer()

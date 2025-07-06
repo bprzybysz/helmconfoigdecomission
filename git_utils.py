@@ -42,12 +42,15 @@ class GitRepository:
         return True
 
     def commit_changes(self, message: str) -> bool:
-        self._run_command(['git', 'add', '.'])
+        add_result = self._run_command(['git', 'add', '.'])
+        if add_result.returncode != 0:
+            logging.error(f"Failed to add files to git: {add_result.stderr}")
+            return False
+
         status_result = self._run_command(['git', 'status', '--porcelain'])
         if not status_result.stdout.strip():
             logging.info("No changes to commit.")
             return True
-            
         result = self._run_command(['git', 'commit', '-m', message])
         if result.returncode == 0:
             logging.info(f"Committed changes with message: '{message}'")

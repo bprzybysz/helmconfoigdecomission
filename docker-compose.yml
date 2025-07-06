@@ -5,4 +5,11 @@ services:
     build: .
     ports:
       - "5001:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    environment:
+      - MCP_LOG_LEVEL=DEBUG
     # Command to run the MCP server

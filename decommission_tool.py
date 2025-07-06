@@ -2,6 +2,90 @@ import os
 import re
 import sys
 import argparse
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Find and remove PostgreSQL database references in a repository.")
+    parser.add_argument("repo_path", help="Path to the git repository.")
+    parser.add_argument("db_name", help="Name of the PostgreSQL database to decommission.")
+    parser.add_argument("--remove", action="store_true", help="If set, actually remove references and commit changes.")
+    parser.add_argument("--branch-name", help="Name of the branch to create for removal changes. Defaults to chore/<db_name>-decommission.")
+    parser.add_argument("--dry-run", action="store_true", help="Perform a dry run without modifying files or creating branches/commits.")
+    args = parser.parse_args()
+
+    if args.remove and args.dry_run:
+        print("Error: Cannot use --remove and --dry-run together.", file=sys.stderr)
+        sys.exit(1)
+
+    repo_path = Path(args.repo_path)
+    if not repo_path.is_dir():
+        print(f"Error: Repository path '{args.repo_path}' is not a valid directory.", file=sys.stderr)
+        sys.exit(1)
+
+    git_repo = None
+    if args.remove or args.dry_run:
+        try:
+            git_repo = GitRepository(str(repo_path))
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    tool = PostgreSQLDecommissionTool(str(repo_path), args.db_name, args.remove and not args.dry_run)
+    
+    original_branch = None
+    test_branch_name = None
+
+    if git_repo:
+        original_branch = git_repo.get_current_branch()
+        if not original_branch:
+            logging.error("Not a git repository or no branch checked out. Cannot perform Git operations.")
+            sys.exit(1)
+        test_branch_name = args.branch_name if args.branch_name else f"chore/{args.db_name}-decommission"
+
+    try:
+        if args.remove and git_repo:
+            if not git_repo.create_test_branch(test_branch_name):
+                logging.error("Failed to create test branch. Aborting.")
+                sys.exit(1)
+        elif args.dry_run:
+            logging.info("Performing dry run. No files will be modified, and no branches/commits will be created.")
+
+        tool.run()
+
+        summary, plan = tool.generate_summary_and_plan()
+        print("\n📝 Summary of Findings:")
+        print(summary)
+        print("\n📝 Decommissioning Plan:")
+        print(plan)
+
+        if args.remove and git_repo:
+            logging.info("\n💾 Committing changes...")
+            commit_message = f"feat: Decommission PostgreSQL DB '{tool.db_name}'"
+            if git_repo.commit_changes(commit_message):
+                logging.info("✅ Changes committed successfully")
+            else:
+                logging.error("❌ Failed to commit changes")
+
+            logging.info("\n✅ Database references removal process finished!")
+            logging.info(f"🌿 Changes are in branch: {git_repo.test_branch}")
+            if original_branch:
+                logging.info(f"💡 To revert, run: git checkout {original_branch} && git branch -D {git_repo.test_branch}")
+        elif args.dry_run:
+            logging.info("\nDry run complete. No changes were applied.")
+    
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}")
+        if (args.remove or args.dry_run) and git_repo and original_branch:
+            git_repo.revert_to_original_branch()
+            logging.info(f"🔄 Reverted to original branch: {original_branch}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
 import yaml
 import subprocess
 from pathlib import Path
